@@ -4,5 +4,4 @@ numpy
 gspread
 google-auth
 requests
-smtplib
-email
+
