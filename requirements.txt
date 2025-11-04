@@ -4,4 +4,3 @@ numpy
 gspread
 google-auth
 requests
-
