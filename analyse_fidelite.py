@@ -181,6 +181,10 @@ if file_tx and file_cp:
                     .merge(margin_tx, on=key_cols, how="left")
     for col in ["CA_Paid_With_Coupons", "Estimated_Net_Margin_HT"]:
         if col not in fact_tx.columns: fact_tx[col] = 0
+
+    st.write("🔍 Colonnes CSV importées :", tx.columns.tolist())
+    st.write("🔍 Exemple de données :", tx.head(2))
+
     # ajoute colonnes utiles
     fact_tx["ValidationDate"] = _ensure_date(tx.set_index(key_cols)[c_valid]).reset_index(drop=True) if c_valid else pd.NaT
     fact_tx["month"] = _month_str(fact_tx["ValidationDate"])
