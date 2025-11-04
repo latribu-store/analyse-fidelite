@@ -86,7 +86,14 @@ coupons_file = st.sidebar.file_uploader("Fichier Bons d’Achat (CSV Keyneo)", t
 emails_supp = st.sidebar.text_input("📧 Autres destinataires (séparés par des virgules)")
 
 if transactions_file and coupons_file:
-    tx = pd.read_csv(transactions_file, sep=";", encoding="utf-8")
+    tx = pd.read_csv(
+    transactions_file,
+    sep=";",
+    encoding="utf-8-sig",
+    on_bad_lines="skip",
+    engine="python"
+)
+
     coupons = pd.read_csv(coupons_file, sep=";", encoding="utf-8")
 
     # Nettoyage et analyse
