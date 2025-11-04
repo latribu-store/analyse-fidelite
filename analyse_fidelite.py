@@ -131,51 +131,62 @@ if file_tx and file_cp:
             cp[c] = pd.to_numeric(cp[c], errors="coerce").fillna(0)
 
     # ------------------------------
-    # 2️⃣ FACT TRANSACTIONS (corrigé)
+    # 2️⃣ FACT TRANSACTIONS (corrigé version finale)
     # ------------------------------
-    tx["__is_tender"] = tx[c_linetype].str.upper().eq("TENDER") if c_linetype else False
-    tx["__is_product"] = tx[c_linetype].str.upper().eq("PRODUCT_SALE") if c_linetype else True  # par défaut, on suppose PRODUCT_SALE si absent
+    # Type de ligne
+    if c_linetype in tx.columns:
+        tx["__is_tender"] = tx[c_linetype].str.upper().eq("TENDER")
+        tx["__is_product"] = tx[c_linetype].str.upper().eq("PRODUCT_SALE")
+    else:
+        tx["__is_tender"] = False
+        tx["__is_product"] = True  # si pas de LineType, on suppose produit
 
-    # marge estimée sur lignes produit
+    # Clés minimales
+    key_cols = [x for x in [c_txid, c_org, c_cust] if x]
+    if not key_cols:
+        st.error("Impossible d’identifier un identifiant de transaction (TransactionID, OrganisationID, etc.)")
+        st.stop()
+
+    # Calcul marge sur lignes produit
     prod = tx[tx["__is_product"]].copy()
     if c_cost and c_gross and c_qty:
         prod["estimated_margin_ht_line"] = prod[c_gross] - (prod[c_cost] * prod[c_qty])
     else:
         prod["estimated_margin_ht_line"] = 0
 
-    # clé transaction robuste
-    key_cols = [x for x in [c_txid, c_valid, c_org, c_cust] if x]
-    if not key_cols:
-        st.error("Impossible d’identifier un identifiant de transaction (TransactionID / TicketNumber / etc.).")
-        st.stop()
+    # 🔹 Agrégats par TransactionID
+    # CA TTC = somme des montants produits
+    ca_tx = prod.groupby(c_txid, dropna=False)[c_total].sum().reset_index().rename(columns={c_total: "CA_Net_TTC"})
+    # Marge HT = somme des marges produits
+    margin_tx = prod.groupby(c_txid, dropna=False)["estimated_margin_ht_line"].sum().reset_index().rename(columns={"estimated_margin_ht_line": "Estimated_Net_Margin_HT"})
 
-    # 🔹 total TTC basé sur lignes PRODUIT
-    ca_tx = prod.groupby([k for k in key_cols if k], dropna=False)[c_total] \
-                .sum().reset_index().rename(columns={c_total: "CA_Net_TTC"})
-
-    # 🔹 marge totale
-    margin_tx = prod.groupby([k for k in key_cols if k], dropna=False)["estimated_margin_ht_line"] \
-                    .sum().reset_index().rename(columns={"estimated_margin_ht_line": "Estimated_Net_Margin_HT"})
-
-    # 🔹 montant payé en bons (lignes TENDER = COUPON)
+    # 🔹 Paiement en bons sur lignes TENDER
     tend = tx[tx["__is_tender"]].copy()
-    tend["is_coupon"] = tend[c_label].str.upper().eq("COUPON") if c_label else False
-    coupons_paid = tend[tend["is_coupon"]].groupby([k for k in key_cols if k], dropna=False)[c_total] \
-                    .sum().reset_index().rename(columns={c_total: "CA_Paid_With_Coupons"})
+    if c_label in tend.columns:
+        tend["is_coupon"] = tend[c_label].fillna("").str.upper().eq("COUPON")
+    else:
+        tend["is_coupon"] = False
+    coupons_paid = tend[tend["is_coupon"]].groupby(c_txid, dropna=False)[c_total].sum().reset_index().rename(columns={c_total: "CA_Paid_With_Coupons"})
 
-    # fusion
-    fact_tx = ca_tx.merge(coupons_paid, on=key_cols, how="left") \
-                .merge(margin_tx, on=key_cols, how="left")
+    # 🔹 Fusion finale
+    fact_tx = ca_tx.merge(coupons_paid, on=c_txid, how="left").merge(margin_tx, on=c_txid, how="left")
 
+    # 🔹 Rattache les colonnes contextuelles uniques par transaction
+    tx_context = tx.drop_duplicates(subset=[c_txid]).copy()
+    cols_context = [c_txid, c_valid, c_org, c_cust]
+    tx_context = tx_context[[c for c in cols_context if c in tx_context.columns]]
+
+    fact_tx = fact_tx.merge(tx_context, on=c_txid, how="left")
+
+    # Nettoyage final
     fact_tx["CA_Paid_With_Coupons"] = fact_tx["CA_Paid_With_Coupons"].fillna(0)
     fact_tx["Estimated_Net_Margin_HT"] = fact_tx["Estimated_Net_Margin_HT"].fillna(0)
-
-    # Ajoute les colonnes de contexte
-    fact_tx["ValidationDate"] = _ensure_date(tx[c_valid]) if c_valid in tx.columns else pd.NaT
+    fact_tx["ValidationDate"] = _ensure_date(fact_tx[c_valid]) if c_valid in fact_tx.columns else pd.NaT
     fact_tx["month"] = _month_str(fact_tx["ValidationDate"])
-    fact_tx["OrganisationId"] = tx[c_org] if c_org in tx.columns else ""
-    fact_tx["CustomerID"] = tx[c_cust] if c_cust in tx.columns else ""
-    fact_tx["TransactionID"] = tx[c_txid] if c_txid in tx.columns else ""
+    fact_tx["OrganisationId"] = fact_tx[c_org] if c_org in fact_tx.columns else ""
+    fact_tx["CustomerID"] = fact_tx[c_cust] if c_cust in fact_tx.columns else ""
+    fact_tx["TransactionID"] = fact_tx[c_txid]
+
 
 
     # ------------------------------
