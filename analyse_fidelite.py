@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os, json, requests
+import os, json, requests, re, smtplib
 from datetime import datetime
 import gspread
 from google.oauth2 import service_account
-import smtplib
 from email.message import EmailMessage
-import re
 
 st.set_page_config(page_title="Analyse Fidélité - La Tribu (v2)", layout="wide")
 st.title("🎯 Analyse Fidélité - La Tribu (v2)")
@@ -28,7 +26,7 @@ SMTP_PASSWORD = st.secrets["email"]["smtp_password"]
 DEFAULT_RECEIVER = st.secrets["email"]["receiver"]
 
 # Auth Google
-file_id = "12O9eFGFmwTu1n6kF4AIDIm0KXKMIgOvg"
+file_id = "12O9eFGFmwTu1n6kF4AIDIm0KXKMIgOvg"  # ton JSON sur Drive
 url = f"https://drive.google.com/uc?id={file_id}"
 response = requests.get(url)
 response.raise_for_status()
@@ -48,7 +46,6 @@ def _month_str(s):
     return s.dt.to_period("M").astype(str)
 
 def _norm_cols(df):
-    """Normalise les noms de colonnes (minuscules, suppression accents et caractères spéciaux)."""
     mapping = {}
     for c in df.columns:
         k = re.sub(r"[^a-z0-9]", "", c.lower())
@@ -56,7 +53,6 @@ def _norm_cols(df):
     return df.rename(columns=mapping)
 
 def _pick(df, *cands):
-    """Retourne la première colonne dispo parmi les candidates."""
     for c in cands:
         k = re.sub(r"[^a-z0-9]", "", c.lower())
         if k in df.columns:
@@ -83,7 +79,9 @@ def _ws_to_df(ws):
     return pd.DataFrame(data, columns=header) if data else pd.DataFrame(columns=header)
 
 def _update_ws(ws, df):
-    values = [list(df.columns)] + df.astype(object).where(pd.notnull(df), "").values.tolist()
+    # convertit toutes les valeurs en str pour éviter les erreurs JSON
+    df = df.astype(str)
+    values = [list(df.columns)] + df.values.tolist()
     ws.clear()
     ws.update("A1", values)
 
@@ -124,7 +122,7 @@ if file_tx and file_cp:
     c_orgc = _pick(cp, "organisationid", "organizationid")
     c_couponid = _pick(cp, "couponid", "id", "code")
 
-    # conversions numériques
+    # coercition numérique
     for c in [c_qty, c_gross, c_cost, c_total]:
         if c and c in tx.columns:
             tx[c] = pd.to_numeric(tx[c], errors="coerce").fillna(0)
@@ -165,7 +163,7 @@ if file_tx and file_cp:
     fact_tx["CA_Paid_With_Coupons"] = fact_tx["CA_Paid_With_Coupons"].fillna(0)
     fact_tx["Estimated_Net_Margin_HT"] = fact_tx["Estimated_Net_Margin_HT"].fillna(0)
 
-    # Ajout colonnes principales
+    # colonnes principales
     fact_tx["ValidationDate"] = _ensure_date(tx[c_valid]) if c_valid in tx.columns else pd.NaT
     fact_tx["month"] = _month_str(fact_tx["ValidationDate"])
     fact_tx["OrganisationId"] = tx[c_org] if c_org in tx.columns else ""
@@ -185,6 +183,11 @@ if file_tx and file_cp:
     cp["month"] = _month_str(cp["UseDate"])
     cp["OrganisationId"] = cp[c_orgc] if c_orgc else ""
     cp["CouponID"] = cp[c_couponid] if c_couponid else ""
+
+    # conversion des dates pour Google Sheets
+    for col in ["EmissionDate", "UseDate"]:
+        if col in cp.columns:
+            cp[col] = pd.to_datetime(cp[col], errors="coerce").dt.strftime("%Y-%m-%d")
 
     coupons_month = cp.dropna(subset=["UseDate"]).groupby(["month", "OrganisationId"], dropna=False)["Value_Used_Line"] \
                        .sum().reset_index().rename(columns={"Value_Used_Line": "Value_Used"})
@@ -210,15 +213,14 @@ if file_tx and file_cp:
     ws_kpi = _open_or_create(SPREADSHEET_ID, SHEET_KPI)
     ws_cp = _open_or_create(SPREADSHEET_ID, SHEET_COUP)
 
-    current_tx = _ws_to_df(ws_tx)
     fact_tx_out = fact_tx[["month", "OrganisationId", "TransactionID", "ValidationDate", "CustomerID",
                            "CA_Net_TTC", "CA_Paid_With_Coupons", "Estimated_Net_Margin_HT"]].copy()
-    fact_tx_out["ValidationDate"] = pd.to_datetime(fact_tx_out["ValidationDate"]).dt.strftime("%Y-%m-%d")
+    fact_tx_out["ValidationDate"] = pd.to_datetime(fact_tx_out["ValidationDate"], errors="coerce").dt.strftime("%Y-%m-%d")
 
+    current_tx = _ws_to_df(ws_tx)
     if current_tx.empty:
         merged_tx = fact_tx_out.copy()
     else:
-        current_tx = current_tx[fact_tx_out.columns.intersection(current_tx.columns)]
         merged_tx = pd.concat([current_tx, fact_tx_out], ignore_index=True)
         merged_tx = merged_tx.sort_values("ValidationDate").drop_duplicates(subset=["TransactionID"], keep="last")
 
