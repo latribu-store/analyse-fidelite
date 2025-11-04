@@ -131,44 +131,52 @@ if file_tx and file_cp:
             cp[c] = pd.to_numeric(cp[c], errors="coerce").fillna(0)
 
     # ------------------------------
-    # 2️⃣ FACT TRANSACTIONS
+    # 2️⃣ FACT TRANSACTIONS (corrigé)
     # ------------------------------
     tx["__is_tender"] = tx[c_linetype].str.upper().eq("TENDER") if c_linetype else False
-    tx["__is_product"] = tx[c_linetype].str.upper().eq("PRODUCT_SALE") if c_linetype else False
+    tx["__is_product"] = tx[c_linetype].str.upper().eq("PRODUCT_SALE") if c_linetype else True  # par défaut, on suppose PRODUCT_SALE si absent
 
+    # marge estimée sur lignes produit
     prod = tx[tx["__is_product"]].copy()
     if c_cost and c_gross and c_qty:
         prod["estimated_margin_ht_line"] = prod[c_gross] - (prod[c_cost] * prod[c_qty])
     else:
         prod["estimated_margin_ht_line"] = 0
 
+    # clé transaction robuste
     key_cols = [x for x in [c_txid, c_valid, c_org, c_cust] if x]
     if not key_cols:
         st.error("Impossible d’identifier un identifiant de transaction (TransactionID / TicketNumber / etc.).")
         st.stop()
 
-    margin_tx = prod.groupby(key_cols, dropna=False)["estimated_margin_ht_line"] \
+    # 🔹 total TTC basé sur lignes PRODUIT
+    ca_tx = prod.groupby([k for k in key_cols if k], dropna=False)[c_total] \
+                .sum().reset_index().rename(columns={c_total: "CA_Net_TTC"})
+
+    # 🔹 marge totale
+    margin_tx = prod.groupby([k for k in key_cols if k], dropna=False)["estimated_margin_ht_line"] \
                     .sum().reset_index().rename(columns={"estimated_margin_ht_line": "Estimated_Net_Margin_HT"})
 
+    # 🔹 montant payé en bons (lignes TENDER = COUPON)
     tend = tx[tx["__is_tender"]].copy()
     tend["is_coupon"] = tend[c_label].str.upper().eq("COUPON") if c_label else False
-
-    totals = tend.groupby(key_cols, dropna=False)[c_total] \
-                 .sum().reset_index().rename(columns={c_total: "CA_Net_TTC"})
-    coupons_paid = tend[tend["is_coupon"]].groupby(key_cols, dropna=False)[c_total] \
+    coupons_paid = tend[tend["is_coupon"]].groupby([k for k in key_cols if k], dropna=False)[c_total] \
                     .sum().reset_index().rename(columns={c_total: "CA_Paid_With_Coupons"})
 
-    fact_tx = totals.merge(coupons_paid, on=key_cols, how="left") \
-                    .merge(margin_tx, on=key_cols, how="left")
+    # fusion
+    fact_tx = ca_tx.merge(coupons_paid, on=key_cols, how="left") \
+                .merge(margin_tx, on=key_cols, how="left")
+
     fact_tx["CA_Paid_With_Coupons"] = fact_tx["CA_Paid_With_Coupons"].fillna(0)
     fact_tx["Estimated_Net_Margin_HT"] = fact_tx["Estimated_Net_Margin_HT"].fillna(0)
 
-    # colonnes principales
+    # Ajoute les colonnes de contexte
     fact_tx["ValidationDate"] = _ensure_date(tx[c_valid]) if c_valid in tx.columns else pd.NaT
     fact_tx["month"] = _month_str(fact_tx["ValidationDate"])
     fact_tx["OrganisationId"] = tx[c_org] if c_org in tx.columns else ""
     fact_tx["CustomerID"] = tx[c_cust] if c_cust in tx.columns else ""
     fact_tx["TransactionID"] = tx[c_txid] if c_txid in tx.columns else ""
+
 
     # ------------------------------
     # 3️⃣ COUPONS
