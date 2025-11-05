@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os, json, requests, re, smtplib
+import os, json, requests
 from datetime import datetime
 import gspread
 from google.oauth2 import service_account
+import smtplib
 from email.message import EmailMessage
+import re
 
 st.set_page_config(page_title="Analyse Fidélité - La Tribu (v2)", layout="wide")
 st.title("🎯 Analyse Fidélité - La Tribu (v2)")
@@ -13,6 +15,7 @@ st.title("🎯 Analyse Fidélité - La Tribu (v2)")
 # ==========================
 # CONFIG
 # ==========================
+HISTO_FILE = "historique_fidelite.csv"
 SPREADSHEET_ID = "1xYQ0mjr37Fnmal8yhi0kBE3_96EN6H6qsYrAtQkHpGo"
 SHEET_TX = "Donnees"
 SHEET_KPI = "KPI_Mensuels"
@@ -25,15 +28,16 @@ SMTP_USER = st.secrets["email"]["smtp_user"]
 SMTP_PASSWORD = st.secrets["email"]["smtp_password"]
 DEFAULT_RECEIVER = st.secrets["email"]["receiver"]
 
-# Auth Google
-file_id = "12O9eFGFmwTu1n6kF4AIDIm0KXKMIgOvg"  # ton JSON sur Drive
+# Auth Google via Service Account stocké sur Drive
+file_id = "12O9eFGFmwTu1n6kF4AIDIm0KXKMIgOvg"
 url = f"https://drive.google.com/uc?id={file_id}"
 response = requests.get(url)
 response.raise_for_status()
-creds_info = json.loads(response.content)
+gcp_service_account_info = json.loads(response.content)
 scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+creds = service_account.Credentials.from_service_account_info(gcp_service_account_info, scopes=scopes)
 client = gspread.authorize(creds)
+
 
 # ==========================
 # HELPERS
@@ -50,7 +54,8 @@ def _norm_cols(df):
     for c in df.columns:
         k = re.sub(r"[^a-z0-9]", "", c.lower())
         mapping[c] = k
-    return df.rename(columns=mapping)
+    df = df.rename(columns=mapping)
+    return df
 
 def _pick(df, *cands):
     for c in cands:
@@ -76,14 +81,15 @@ def _ws_to_df(ws):
         return pd.DataFrame()
     header = rows[0]
     data = rows[1:]
-    return pd.DataFrame(data, columns=header) if data else pd.DataFrame(columns=header)
+    if not data:
+        return pd.DataFrame(columns=header)
+    return pd.DataFrame(data, columns=header)
 
 def _update_ws(ws, df):
-    # convertit toutes les valeurs en str pour éviter les erreurs JSON
-    df = df.astype(str)
-    values = [list(df.columns)] + df.values.tolist()
+    values = [list(df.columns)] + df.astype(object).where(pd.notnull(df), "").values.tolist()
     ws.clear()
     ws.update("A1", values)
+
 
 # ==========================
 # UI
@@ -97,160 +103,146 @@ if file_tx and file_cp:
     # ------------------------------
     # 1️⃣ LECTURE + NORMALISATION
     # ------------------------------
-    tx = _norm_cols(_read_csv_tolerant(file_tx))
-    cp = _norm_cols(_read_csv_tolerant(file_cp))
+    tx_raw = _read_csv_tolerant(file_tx)
+    cp_raw = _read_csv_tolerant(file_cp)
 
-    st.write("🔍 Colonnes CSV importées :", tx.columns.tolist())
+    tx = _norm_cols(tx_raw)
+    cp = _norm_cols(cp_raw)
 
-    # colonnes transactions
-    c_valid = _pick(tx, "validationdate", "datevalidation", "operationdate")
-    c_label = _pick(tx, "label", "paymentmethod", "tenderlabel")
-    c_linetype = _pick(tx, "linetype")
+    # ------------------------------
+    # 2️⃣ FACT TRANSACTIONS (RÈGLES OFFICIELLES)
+    # ------------------------------
+    c_txid = _pick(tx, "ticketnumber", "transactionid", "operationid")
     c_total = _pick(tx, "totalamount", "total_ttc")
+    c_label = _pick(tx, "label", "paymentmethod", "tenderlabel")
+    c_valid = _pick(tx, "validationdate", "datevalidation", "operationdate")
     c_org = _pick(tx, "organisationid", "organizationid")
     c_cust = _pick(tx, "customerid", "clientid")
-    c_txid = _pick(tx, "transactionid", "ticketnumber", "operationid")
-    c_qty = _pick(tx, "quantity", "qty")
     c_gross = _pick(tx, "linegrossamount", "gross_ht")
-    c_cost = _pick(tx, "lineunitpurchasingprice", "unitpurchaseprice")
+    c_costtot = _pick(tx, "linetotalpurchasingamount", "totalpurchasingamount")
 
-    # colonnes coupons
+    # Sécurise les colonnes numériques
+    for col in [c_total, c_gross, c_costtot]:
+        if col and col in tx.columns:
+            tx[col] = pd.to_numeric(tx[col], errors="coerce")
+
+    # 1️⃣ CA TTC : une seule occurrence par ticket
+    ca_ttc = (
+        tx.dropna(subset=[c_txid])
+          .groupby(c_txid, dropna=False)[c_total]
+          .max()
+          .rename("CA_Net_TTC")
+          .reset_index()
+    )
+
+    # 2️⃣ CA via COUPONS : si une ligne du ticket a label == "COUPON"
+    has_coupon = (
+        tx.assign(_label=tx[c_label].fillna("").str.upper() if c_label in tx.columns else "")
+          .groupby(c_txid, dropna=False)["_label"]
+          .apply(lambda s: (s == "COUPON").any())
+          .rename("Has_Coupon")
+          .reset_index()
+    )
+    fact_tx = ca_ttc.merge(has_coupon, on=c_txid, how="left")
+    fact_tx["CA_Paid_With_Coupons"] = np.where(fact_tx["Has_Coupon"], fact_tx["CA_Net_TTC"], 0.0)
+
+    # 3️⃣ CA HT = somme de linegrossamount par ticket
+    ca_ht = (
+        tx.groupby(c_txid, dropna=False)[c_gross]
+          .sum(min_count=1)
+          .fillna(0.0)
+          .rename("CA_Net_HT")
+          .reset_index()
+    )
+    fact_tx = fact_tx.merge(ca_ht, on=c_txid, how="left")
+
+    # 4️⃣ Coût marchandises = somme de linetotalpurchasingamount par ticket
+    costs = (
+        tx.groupby(c_txid, dropna=False)[c_costtot]
+          .sum(min_count=1)
+          .fillna(0.0)
+          .rename("Purch_Total_HT")
+          .reset_index()
+    )
+    fact_tx = fact_tx.merge(costs, on=c_txid, how="left")
+
+    # 5️⃣ Marge HT = CA_HT - Coût
+    fact_tx["Estimated_Net_Margin_HT"] = (fact_tx["CA_Net_HT"] - fact_tx["Purch_Total_HT"]).fillna(0.0)
+
+    # Ajoute contexte
+    ctx_cols = [c_txid, c_valid, c_org, c_cust]
+    ctx = (
+        tx.dropna(subset=[c_txid])[ctx_cols]
+          .sort_values(by=[c_txid, c_valid] if c_valid in tx.columns else [c_txid])
+          .drop_duplicates(subset=[c_txid], keep="first")
+          .rename(columns={
+              c_valid: "ValidationDate",
+              c_org: "OrganisationId",
+              c_cust: "CustomerID",
+              c_txid: "TransactionID"
+          })
+    )
+    fact_tx = fact_tx.merge(ctx, left_on=c_txid, right_on="TransactionID", how="left")
+
+    fact_tx["ValidationDate"] = _ensure_date(fact_tx["ValidationDate"])
+    fact_tx["month"] = _month_str(fact_tx["ValidationDate"])
+
+    fact_tx["OrganisationId"] = fact_tx["OrganisationId"].fillna("")
+    fact_tx["CustomerID"] = fact_tx["CustomerID"].fillna("")
+
+    st.success("✅ Transactions agrégées par ticket selon les 5 règles officielles.")
+    st.dataframe(fact_tx.head(20))
+
+    # ------------------------------
+    # 3️⃣ COUPONS (inchangé)
+    # ------------------------------
     c_init = _pick(cp, "initialvalue", "initialamount")
     c_rem = _pick(cp, "amount", "remaining")
     c_usedate = _pick(cp, "usedate")
     c_emiss = _pick(cp, "creationdate", "emissiondate")
     c_orgc = _pick(cp, "organisationid", "organizationid")
-    c_couponid = _pick(cp, "couponid", "id", "code")
+    c_couponid = _pick(cp, "couponid", "code")
 
-    # coercition numérique
-    for c in [c_qty, c_gross, c_cost, c_total]:
-        if c and c in tx.columns:
-            tx[c] = pd.to_numeric(tx[c], errors="coerce").fillna(0)
-    for c in [c_init, c_rem]:
-        if c and c in cp.columns:
-            cp[c] = pd.to_numeric(cp[c], errors="coerce").fillna(0)
+    if c_init and c_init in cp.columns: cp[c_init] = pd.to_numeric(cp[c_init], errors="coerce").fillna(0)
+    if c_rem and c_rem in cp.columns: cp[c_rem] = pd.to_numeric(cp[c_rem], errors="coerce").fillna(0)
 
-    # ------------------------------
-    # 2️⃣ FACT TRANSACTIONS (corrigé version finale)
-    # ------------------------------
-    # Type de ligne
-    if c_linetype in tx.columns:
-        tx["__is_tender"] = tx[c_linetype].str.upper().eq("TENDER")
-        tx["__is_product"] = tx[c_linetype].str.upper().eq("PRODUCT_SALE")
-    else:
-        tx["__is_tender"] = False
-        tx["__is_product"] = True  # si pas de LineType, on suppose produit
-
-    # Clés minimales
-    key_cols = [x for x in [c_txid, c_org, c_cust] if x]
-    if not key_cols:
-        st.error("Impossible d’identifier un identifiant de transaction (TransactionID, OrganisationID, etc.)")
-        st.stop()
-
-    # Calcul marge sur lignes produit
-    prod = tx[tx["__is_product"]].copy()
-    if c_cost and c_gross and c_qty:
-        prod["estimated_margin_ht_line"] = prod[c_gross] - (prod[c_cost] * prod[c_qty])
-    else:
-        prod["estimated_margin_ht_line"] = 0
-
-    # 🔹 Agrégats par TransactionID
-    # CA TTC = somme des montants produits
-    ca_tx = prod.groupby(c_txid, dropna=False)[c_total].sum().reset_index().rename(columns={c_total: "CA_Net_TTC"})
-    # Marge HT = somme des marges produits
-    margin_tx = prod.groupby(c_txid, dropna=False)["estimated_margin_ht_line"].sum().reset_index().rename(columns={"estimated_margin_ht_line": "Estimated_Net_Margin_HT"})
-
-    # 🔹 Paiement en bons sur lignes TENDER
-    tend = tx[tx["__is_tender"]].copy()
-    if c_label in tend.columns:
-        tend["is_coupon"] = tend[c_label].fillna("").str.upper().eq("COUPON")
-    else:
-        tend["is_coupon"] = False
-    coupons_paid = tend[tend["is_coupon"]].groupby(c_txid, dropna=False)[c_total].sum().reset_index().rename(columns={c_total: "CA_Paid_With_Coupons"})
-
-    # 🔹 Fusion finale
-    fact_tx = ca_tx.merge(coupons_paid, on=c_txid, how="left").merge(margin_tx, on=c_txid, how="left")
-
-    # 🔹 Rattache les colonnes contextuelles uniques par transaction
-    tx_context = tx.drop_duplicates(subset=[c_txid]).copy()
-    cols_context = [c_txid, c_valid, c_org, c_cust]
-    tx_context = tx_context[[c for c in cols_context if c in tx_context.columns]]
-
-    fact_tx = fact_tx.merge(tx_context, on=c_txid, how="left")
-
-    # Nettoyage final
-    fact_tx["CA_Paid_With_Coupons"] = fact_tx["CA_Paid_With_Coupons"].fillna(0)
-    fact_tx["Estimated_Net_Margin_HT"] = fact_tx["Estimated_Net_Margin_HT"].fillna(0)
-    fact_tx["ValidationDate"] = _ensure_date(fact_tx[c_valid]) if c_valid in fact_tx.columns else pd.NaT
-    fact_tx["month"] = _month_str(fact_tx["ValidationDate"])
-    fact_tx["OrganisationId"] = fact_tx[c_org] if c_org in fact_tx.columns else ""
-    fact_tx["CustomerID"] = fact_tx[c_cust] if c_cust in fact_tx.columns else ""
-    fact_tx["TransactionID"] = fact_tx[c_txid]
-
-
-
-    # ------------------------------
-    # 3️⃣ COUPONS
-    # ------------------------------
-    cp["UseDate"] = _ensure_date(cp[c_usedate]) if c_usedate in cp.columns else pd.NaT
-    cp["EmissionDate"] = _ensure_date(cp[c_emiss]) if c_emiss in cp.columns else pd.NaT
+    cp["UseDate"] = _ensure_date(cp[c_usedate]) if c_usedate else pd.NaT
+    cp["EmissionDate"] = _ensure_date(cp[c_emiss]) if c_emiss else pd.NaT
     cp["Amount_Initial"] = cp[c_init] if c_init else 0
     cp["Amount_Remaining"] = cp[c_rem] if c_rem else 0
     cp["Value_Used_Line"] = (cp["Amount_Initial"] - cp["Amount_Remaining"]).clip(lower=0)
     cp["IsUsed"] = cp["Value_Used_Line"] > 0
     cp["Days_To_Use"] = (cp["UseDate"] - cp["EmissionDate"]).dt.days
     cp["month"] = _month_str(cp["UseDate"])
-    cp["OrganisationId"] = cp[c_orgc] if c_orgc else ""
-    cp["CouponID"] = cp[c_couponid] if c_couponid else ""
-
-    # conversion des dates pour Google Sheets
-    for col in ["EmissionDate", "UseDate"]:
-        if col in cp.columns:
-            cp[col] = pd.to_datetime(cp[col], errors="coerce").dt.strftime("%Y-%m-%d")
-
-    coupons_month = cp.dropna(subset=["UseDate"]).groupby(["month", "OrganisationId"], dropna=False)["Value_Used_Line"] \
-                       .sum().reset_index().rename(columns={"Value_Used_Line": "Value_Used"})
+    if c_orgc: cp["OrganisationId"] = cp[c_orgc]
+    if c_couponid: cp["CouponID"] = cp[c_couponid]
 
     # ------------------------------
-    # 4️⃣ KPI MENSUELS
-    # ------------------------------
-    kpi_tx = fact_tx.groupby(["month", "OrganisationId"], dropna=False).agg(
-        CA_Net_TTC=("CA_Net_TTC", "sum"),
-        CA_Paid_With_Coupons=("CA_Paid_With_Coupons", "sum"),
-        Estimated_Net_Margin_HT=("Estimated_Net_Margin_HT", "sum"),
-    ).reset_index()
-
-    kpi = kpi_tx.merge(coupons_month, on=["month", "OrganisationId"], how="left").fillna(0)
-    kpi["Voucher_Share"] = np.where(kpi["CA_Net_TTC"] > 0, kpi["CA_Paid_With_Coupons"] / kpi["CA_Net_TTC"], np.nan)
-    kpi["Net_Margin_After_Loyalty"] = kpi["Estimated_Net_Margin_HT"] - kpi["Value_Used"]
-    kpi["ROI_Proxy"] = np.where(kpi["Value_Used"] > 0, (kpi["CA_Paid_With_Coupons"] - kpi["Value_Used"]) / kpi["Value_Used"], np.nan)
-
-    # ------------------------------
-    # 5️⃣ EXPORT GOOGLE SHEETS
+    # 4️⃣ EXPORT → Google Sheets
     # ------------------------------
     ws_tx = _open_or_create(SPREADSHEET_ID, SHEET_TX)
-    ws_kpi = _open_or_create(SPREADSHEET_ID, SHEET_KPI)
     ws_cp = _open_or_create(SPREADSHEET_ID, SHEET_COUP)
 
-    fact_tx_out = fact_tx[["month", "OrganisationId", "TransactionID", "ValidationDate", "CustomerID",
-                           "CA_Net_TTC", "CA_Paid_With_Coupons", "Estimated_Net_Margin_HT"]].copy()
-    fact_tx_out["ValidationDate"] = pd.to_datetime(fact_tx_out["ValidationDate"], errors="coerce").dt.strftime("%Y-%m-%d")
+    # Transactions : on garde colonnes clés
+    fact_tx_out = fact_tx[[
+        "month", "OrganisationId", "TransactionID", "ValidationDate", "CustomerID",
+        "CA_Net_TTC", "CA_Paid_With_Coupons", "CA_Net_HT", "Purch_Total_HT", "Estimated_Net_Margin_HT"
+    ]].copy()
+    fact_tx_out["ValidationDate"] = pd.to_datetime(fact_tx_out["ValidationDate"]).dt.strftime("%Y-%m-%d")
+    _update_ws(ws_tx, fact_tx_out)
 
-    current_tx = _ws_to_df(ws_tx)
-    if current_tx.empty:
-        merged_tx = fact_tx_out.copy()
-    else:
-        merged_tx = pd.concat([current_tx, fact_tx_out], ignore_index=True)
-        merged_tx = merged_tx.sort_values("ValidationDate").drop_duplicates(subset=["TransactionID"], keep="last")
+    cp_out = cp[[
+        "CouponID","OrganisationId","EmissionDate","UseDate",
+        "Amount_Initial","Amount_Remaining","Value_Used_Line","IsUsed","Days_To_Use","month"
+    ]].copy()
+    cp_out["EmissionDate"] = pd.to_datetime(cp_out["EmissionDate"]).dt.strftime("%Y-%m-%d")
+    cp_out["UseDate"] = pd.to_datetime(cp_out["UseDate"]).dt.strftime("%Y-%m-%d")
+    _update_ws(ws_cp, cp_out)
 
-    _update_ws(ws_tx, merged_tx)
-    _update_ws(ws_kpi, kpi)
-    _update_ws(ws_cp, cp)
-
-    st.success("✅ Données envoyées sur Google Sheets (Donnees, KPI_Mensuels, Coupons).")
+    st.success("✅ Données exportées vers Google Sheets (transactions + coupons).")
 
     # ------------------------------
-    # 6️⃣ EMAIL
+    # 5️⃣ EMAIL
     # ------------------------------
     if st.button("📤 Envoyer le lien Looker par e-mail"):
         recipients_default = ["charles.risso@latribu.fr"]
@@ -259,8 +251,9 @@ if file_tx and file_cp:
         msg["Subject"] = f"📊 Rapport fidélité La Tribu - {datetime.today().strftime('%d-%m-%Y')}"
         msg["From"] = SMTP_USER
         msg["To"] = ", ".join(all_recipients)
-        msg.set_content(f"Bonjour,\n\nVoici le lien vers le tableau de bord fidélité :\n👉 {LOOKER_URL}\n")
-
+        msg.set_content(
+            f"Bonjour,\n\nVoici le lien vers le tableau de bord de suivi du programme fidélité :\n👉 {LOOKER_URL}\n"
+        )
         try:
             with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
                 server.starttls()
@@ -272,4 +265,4 @@ if file_tx and file_cp:
             st.exception(e)
 
 else:
-    st.info("Veuillez importer le CSV **transactions** et le CSV **coupons** pour démarrer.")
+    st.info("Veuillez importer les fichiers CSV **transactions** et **coupons** pour démarrer.")
