@@ -166,57 +166,96 @@ if file_tx and file_cp:
     _update_ws(ws_cp, cp_out)
 
     # ==========================
-    # --- KPI COMPLET ET CORRIGÉ ---
+    # --- KPI COMPLET CORRIGÉ ---
     # ==========================
 
-    # 🔹 1) Base clients identifiés uniquement
-    base_clients = fact_tx.dropna(subset=["CustomerID"]).copy()
-    base_clients["CustomerID"] = (
-        base_clients["CustomerID"].astype(str).str.strip().str.lower()
-    )
-    base_clients = base_clients.sort_values(["CustomerID", "ValidationDate"])
+    import pandas as pd
+    import numpy as np
 
-    # Date de première transaction par client
+    # --- 0) Lecture & nettoyage CSV robuste ---
+    def _read_csv_tolerant(uploaded):
+        df = pd.read_csv(
+            uploaded,
+            sep=";",
+            encoding="utf-8-sig",
+            on_bad_lines="skip",
+            engine="python",
+            dtype=str
+        )
+        for col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace("'", "", regex=False)
+                .str.replace(",", ".", regex=False)
+                .str.strip()
+            )
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="ignore")
+        return df
+
+    # =====================================================
+    # --- 1) Calculs KPI principaux avec corrections ---
+    # =====================================================
+
+    # 🔹 Transactions clients et récurrence réelle
+    tx_clients = fact_tx.dropna(subset=["CustomerID"]).copy()
+    tx_clients["CustomerID"] = tx_clients["CustomerID"].astype(str).str.strip().str.lower()
+
+    # Nombre de transactions et clients identifiés
+    churn = (
+        tx_clients.groupby(["month", "OrganisationId"], dropna=False)
+        .agg(
+            Transactions_Client=("TransactionID", "nunique"),
+            Customers=("CustomerID", "nunique"),
+        )
+        .reset_index()
+    )
+
+    # Nouveaux clients
     first_seen = (
-        base_clients.groupby("CustomerID", dropna=True)["ValidationDate"]
+        tx_clients.groupby("CustomerID")["ValidationDate"]
         .min()
         .reset_index(name="FirstDate")
     )
-
-    # Marquage des nouveaux clients
-    base2 = base_clients.merge(first_seen, on="CustomerID", how="left")
-    base2["IsNewThisMonth"] = (
-        base2["ValidationDate"].dt.to_period("M") == base2["FirstDate"].dt.to_period("M")
+    tx_clients = tx_clients.merge(first_seen, on="CustomerID", how="left")
+    tx_clients["IsNewThisMonth"] = (
+        tx_clients["ValidationDate"].dt.to_period("M") == tx_clients["FirstDate"].dt.to_period("M")
     )
-
-    # 🔹 2) Agrégats client mensuels
     new_cust = (
-        base2[base2["IsNewThisMonth"]]
+        tx_clients[tx_clients["IsNewThisMonth"]]
         .groupby(["month", "OrganisationId"], dropna=False)["CustomerID"]
         .nunique()
         .reset_index(name="New_Customers")
     )
+    churn = churn.merge(new_cust, on=["month", "OrganisationId"], how="left").fillna(0)
 
-    churn = (
-        base2.groupby(["month", "OrganisationId"], dropna=False)
-        .agg(
-            Transactions=("TransactionID", "nunique"),
-            Customers=("CustomerID", "nunique"),
-        )
-        .reset_index()
-        .merge(new_cust, on=["month", "OrganisationId"], how="left")
-        .fillna({"New_Customers": 0})
-    )
+    # Clients revenants et récurrence (uniquement clients connus)
     churn["Returning_Customers"] = churn["Customers"] - churn["New_Customers"]
-
-    # ✅ Recurrence corrigée : uniquement transactions avec clients connus
     churn["Recurrence"] = np.where(
-        churn["Customers"] > 0, churn["Transactions"] / churn["Customers"], np.nan
+        churn["Customers"] > 0,
+        churn["Transactions_Client"] / churn["Customers"],
+        np.nan,
     )
 
-    # 🔹 3) Rétention
+    # 🔹 Transactions totales (clients + anonymes)
+    tx_all = (
+        fact_tx.groupby(["month", "OrganisationId"], dropna=False)["TransactionID"]
+        .nunique()
+        .reset_index(name="Transactions_All")
+    )
+
+    # 🔹 Fusion pour taux d'association
+    assoc = churn.merge(tx_all, on=["month", "OrganisationId"], how="left")
+    assoc["Taux_Association_Client_Ticket"] = np.where(
+        assoc["Transactions_All"] > 0,
+        assoc["Transactions_Client"] / assoc["Transactions_All"],
+        np.nan,
+    )
+
+    # 🔹 Rétention clients
     cust_sets = (
-        base2.groupby(["OrganisationId", "month"], dropna=False)["CustomerID"]
+        tx_clients.groupby(["OrganisationId", "month"], dropna=False)["CustomerID"]
         .apply(lambda s: set(s.unique()))
         .reset_index()
         .rename(columns={"CustomerID": "CustSet"})
@@ -234,7 +273,7 @@ if file_tx and file_cp:
     cust_sets["Retention_Rate"] = cust_sets.apply(_retention, axis=1)
     retention = cust_sets[["month", "OrganisationId", "Retention_Rate"]]
 
-    # 🔹 4) Transactions & marges globales
+    # 🔹 KPI financiers
     kpi_tx = (
         fact_tx.groupby(["month", "OrganisationId"], dropna=False)
         .agg(
@@ -242,12 +281,11 @@ if file_tx and file_cp:
             CA_Net_HT=("CA_Net_HT", "sum"),
             CA_Paid_With_Coupons=("CA_Paid_With_Coupons", "sum"),
             Estimated_Net_Margin_HT=("Estimated_Net_Margin_HT", "sum"),
-            Transactions_All=("TransactionID", "nunique"),
         )
         .reset_index()
     )
 
-    # 🔹 5) Bons émis / utilisés
+    # 🔹 Bons émis et utilisés
     coupons_month = (
         cp.dropna(subset=["UseDate"])
         .groupby(["month", "OrganisationId"], dropna=False)["Value_Used_Line"]
@@ -264,22 +302,17 @@ if file_tx and file_cp:
         .rename(columns={"Amount_Initial": "Value_Emitted"})
     )
 
-    # 🔹 6) Taux d’association client/ticket
-    assoc = (
-        fact_tx.groupby(["month", "OrganisationId"], dropna=False)
+    # 🔹 Statistiques sur les coupons
+    coupons_stats = (
+        cp.groupby(["month", "OrganisationId"], dropna=False)
         .agg(
-            Transactions_All=("TransactionID", "nunique"),
-            Transactions_With_Customer=("CustomerID", lambda x: x.notna().sum()),
+            Coupons_Emitted=("CouponID", "count"),
+            Coupons_Used=("IsUsed", "sum"),
         )
         .reset_index()
     )
-    assoc["Taux_Association_Client_Ticket"] = np.where(
-        assoc["Transactions_All"] > 0,
-        assoc["Transactions_With_Customer"] / assoc["Transactions_All"],
-        np.nan,
-    )
 
-    # 🔹 7) Paniers moyens
+    # 🔹 Paniers moyens
     pm_global = (
         fact_tx.groupby(["month", "OrganisationId"], dropna=False)["CA_Net_TTC"]
         .mean()
@@ -310,13 +343,17 @@ if file_tx and file_cp:
         .reset_index(name="PanierMoyen_SansClient")
     )
 
-    # 🔹 8) Fusion complète
+    # =====================================================
+    # --- 2) Fusion finale ---
+    # =====================================================
+
     kpi = (
         kpi_tx.merge(coupons_month, on=["month", "OrganisationId"], how="left")
         .merge(coupons_emis, on=["month", "OrganisationId"], how="left")
         .merge(churn, on=["month", "OrganisationId"], how="left")
         .merge(retention, on=["month", "OrganisationId"], how="left")
-        .merge(assoc[["month", "OrganisationId", "Taux_Association_Client_Ticket"]], on=["month", "OrganisationId"], how="left")
+        .merge(coupons_stats, on=["month", "OrganisationId"], how="left")
+        .merge(assoc, on=["month", "OrganisationId"], how="left")
         .merge(pm_global, on=["month", "OrganisationId"], how="left")
         .merge(pm_coupon, on=["month", "OrganisationId"], how="left")
         .merge(pm_sans_coupon, on=["month", "OrganisationId"], how="left")
@@ -325,7 +362,10 @@ if file_tx and file_cp:
         .fillna(0)
     )
 
-    # 🔹 9) Ratios & indicateurs complémentaires
+    # =====================================================
+    # --- 3) Calculs dérivés ---
+    # =====================================================
+
     kpi["Voucher_Share"] = np.where(
         kpi["CA_Net_TTC"] > 0, kpi["CA_Paid_With_Coupons"] / kpi["CA_Net_TTC"], np.nan
     )
@@ -341,21 +381,6 @@ if file_tx and file_cp:
         (kpi["CA_Paid_With_Coupons"] - kpi["Value_Used"]) / kpi["Value_Used"],
         np.nan,
     )
-    # 🔹 9 bis) Taux d'utilisation des coupons (quantité & montant)
-    # On recalcule proprement les volumes de coupons émis et utilisés
-    coupons_stats = (
-        cp.groupby(["month", "OrganisationId"], dropna=False)
-        .agg(
-            Coupons_Emitted=("CouponID", "count"),
-            Coupons_Used=("IsUsed", "sum"),
-        )
-        .reset_index()
-    )
-
-    # On merge pour que les colonnes existent
-    kpi = kpi.merge(coupons_stats, on=["month", "OrganisationId"], how="left").fillna(0)
-
-    # Taux d’utilisation en quantité et en montant
     kpi["Taux_Utilisation_Coupons_Qté"] = np.where(
         kpi["Coupons_Emitted"] > 0,
         kpi["Coupons_Used"] / kpi["Coupons_Emitted"],
@@ -367,17 +392,24 @@ if file_tx and file_cp:
         np.nan,
     )
 
+    # =====================================================
+    # --- 4) Colonne Date lisible pour Looker Studio ---
+    # =====================================================
 
-    # 🔹 10) Ajout de la vraie colonne Date (premier jour du mois)
-    kpi["Date"] = pd.to_datetime(kpi["month"], format="%Y-%m") + pd.offsets.MonthBegin(0)
+    # Conversion au format texte français JJ/MM/AAAA
+    kpi["Date"] = pd.to_datetime(kpi["month"], format="%Y-%m").dt.strftime("%d/%m/%Y")
 
-    # 🔹 11) Export final vers Google Sheets
+    # =====================================================
+    # --- 5) Export & affichage ---
+    # =====================================================
+
     ws_kpi = _open_or_create(SPREADSHEET_ID, SHEET_KPI)
     _update_ws(ws_kpi, kpi)
 
     st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées et KPI mis à jour.")
     with st.expander("👀 Aperçu KPI (10 premières lignes)"):
         st.dataframe(kpi.head(10))
+
 
 
 
