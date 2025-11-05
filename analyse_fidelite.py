@@ -341,9 +341,24 @@ if file_tx and file_cp:
         (kpi["CA_Paid_With_Coupons"] - kpi["Value_Used"]) / kpi["Value_Used"],
         np.nan,
     )
+    # 🔹 9 bis) Taux d'utilisation des coupons (quantité & montant)
+    # On recalcule proprement les volumes de coupons émis et utilisés
+    coupons_stats = (
+        cp.groupby(["month", "OrganisationId"], dropna=False)
+        .agg(
+            Coupons_Emitted=("CouponID", "count"),
+            Coupons_Used=("IsUsed", "sum"),
+        )
+        .reset_index()
+    )
+
+    # On merge pour que les colonnes existent
+    kpi = kpi.merge(coupons_stats, on=["month", "OrganisationId"], how="left").fillna(0)
+
+    # Taux d’utilisation en quantité et en montant
     kpi["Taux_Utilisation_Coupons_Qté"] = np.where(
-        kpi.get("Coupons_Emitted", 0) > 0,
-        kpi.get("Coupons_Used", 0) / kpi.get("Coupons_Emitted", 0),
+        kpi["Coupons_Emitted"] > 0,
+        kpi["Coupons_Used"] / kpi["Coupons_Emitted"],
         np.nan,
     )
     kpi["Taux_Utilisation_Coupons_Montant"] = np.where(
@@ -351,6 +366,7 @@ if file_tx and file_cp:
         kpi["Value_Used"] / kpi["Value_Emitted"],
         np.nan,
     )
+
 
     # 🔹 10) Ajout de la vraie colonne Date (premier jour du mois)
     kpi["Date"] = pd.to_datetime(kpi["month"], format="%Y-%m") + pd.offsets.MonthBegin(0)
