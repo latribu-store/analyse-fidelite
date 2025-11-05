@@ -195,19 +195,17 @@ if file_tx and file_cp:
     # =====================================================
     # 4) AGRÉGATS KPI — EXACTEMENT LES COLONNES DEMANDÉES
     # =====================================================
-    # Bases par (month, OrganisationID)
-    grp = ["month","OrganisationID"]
-
+       
+     # Calcul des agrégats de base sans placeholder invalides
     base = fact.groupby(grp).agg(
         **{
             "CA TTC": ("CA_TTC","sum"),
             "CA HT": ("CA_HT","sum"),
-            "Marge net HT avant coupon": (lambda x: np.nan),   # placeholder, recalculé plus bas
-            "Quantité total": ("Qty_Ticket","sum"),            # intermédiaire
-            "Transaction (nombre)": ("TransactionID","nunique"),
-            "Transaction associé à un client (nombre)": (lambda df: df[fact.columns.get_loc("TransactionID")]) # placeholder
+            "Quantité total": ("Qty_Ticket","sum"),
+            "Transaction (nombre)": ("TransactionID","nunique")
         }
-    )
+    ).reset_index()
+
 
     # comme agg lambda sur DataFrame n'est pas simple, on recalcule proprement :
     base = fact.groupby(grp).agg(
