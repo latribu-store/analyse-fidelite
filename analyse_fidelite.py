@@ -244,17 +244,31 @@ if file_tx and file_cp:
     base2 = base_clients.merge(first_seen, on="CustomerID", how="left")
     base2["IsNewThisMonth"] = base2["ValidationDate"].dt.to_period("M") == base2["FirstDate"].dt.to_period("M")
 
-    # Calcul agrégats client / mois
-    churn = base2.groupby(["month", "OrganisationId"], dropna=False).agg(
-        Transactions=("TransactionID", "nunique"),  # ⚠️ uniquement tickets AVEC CustomerID
-        Customers=("CustomerID", "nunique"),
-        New_Customers=("IsNewThisMonth", "sum"),
-    ).reset_index()
+    # Compte les clients uniques nouveaux par mois (pas les transactions)
+    new_cust = (
+    base2[base2["IsNewThisMonth"]]
+    .groupby(["month", "OrganisationId"], dropna=False)["CustomerID"]
+    .nunique()
+    .reset_index(name="New_Customers")
+    )
+
+    # Agrégats principaux
+    churn = (
+    base2.groupby(["month", "OrganisationId"], dropna=False)
+    .agg(
+        Transactions=("TransactionID", "nunique"),
+        Customers=("CustomerID", "nunique")
+    )
+    .reset_index()
+    .merge(new_cust, on=["month", "OrganisationId"], how="left")
+    .fillna({"New_Customers": 0})
+    )
 
     churn["Returning_Customers"] = churn["Customers"] - churn["New_Customers"]
     churn["Recurrence"] = np.where(
-        churn["Customers"] > 0, churn["Transactions"] / churn["Customers"], np.nan
+    churn["Customers"] > 0, churn["Transactions"] / churn["Customers"], np.nan
     )
+
 
     # ✅ Rétention M-1 ➜ M par magasin (share des clients de M-1 qui reviennent en M)
     # Liste des clients par (mois, org)
