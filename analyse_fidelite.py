@@ -187,19 +187,58 @@ if file_tx and file_cp:
     # ------------------------------
     # 5️⃣ KPI MENSUELS (snapshot complet)
     # ------------------------------
-    churn = fact_tx.groupby(["month", "OrganisationId"], dropna=False).agg(
-        Transactions=("TransactionID", "nunique"),
-        CA_Net_TTC=("CA_Net_TTC", "sum"),
-        CA_Paid_With_Coupons=("CA_Paid_With_Coupons", "sum"),
-        Estimated_Net_Margin_HT=("Estimated_Net_Margin_HT", "sum"),
+    base = fact_tx.copy()
+    base["has_coupon"] = base["CA_Paid_With_Coupons"].fillna(0) > 0
+
+    # Panier moyen TTC par client/mois
+    pm = base.groupby(["month","OrganisationId","CustomerID"], dropna=False)["CA_Net_TTC"] \
+             .mean().reset_index().rename(columns={"CA_Net_TTC":"Avg_Basket_Value"})
+    pmc = base[base["has_coupon"]].groupby(["month","OrganisationId","CustomerID"], dropna=False)["CA_Net_TTC"] \
+              .mean().reset_index().rename(columns={"CA_Net_TTC":"Avg_Basket_Value_With_Coupon"})
+
+    # Nouveaux vs revenants
+    base_sorted = base.sort_values(["CustomerID","ValidationDate"])
+    first_seen = base_sorted.groupby("CustomerID", dropna=True)["ValidationDate"].min().reset_index(name="FirstDate")
+    base2 = base_sorted.merge(first_seen, on="CustomerID", how="left")
+    base2["IsNewThisMonth"] = base2["ValidationDate"].dt.to_period("M") == base2["FirstDate"].dt.to_period("M")
+
+    churn = base2.groupby(["month","OrganisationId"], dropna=False).agg(
+        Transactions=("TransactionID","nunique"),
+        Customers=("CustomerID","nunique"),
+        New_Customers=("IsNewThisMonth","sum")
     ).reset_index()
+    churn["Returning_Customers"] = churn["Customers"] - churn["New_Customers"]
+    churn["Recurrence"] = np.where(churn["Customers"]>0, churn["Transactions"]/churn["Customers"], np.nan)
+    churn["Retention_Rate"] = np.nan  # (à calculer entre mois dans Looker si besoin)
+
+    # Valeur utilisée mensuelle des coupons
     coupons_month = cp_out.dropna(subset=["UseDate"]).groupby(["month", c_orgc], dropna=False)["Value_Used_Line"] \
-        .sum().reset_index().rename(columns={"Value_Used_Line": "Value_Used"})
-    kpi = churn.merge(coupons_month, left_on=["month", "OrganisationId"], right_on=["month", c_orgc], how="left").fillna(0)
+                       .sum().reset_index().rename(columns={"Value_Used_Line":"Value_Used"})
+
+    # Agrégats transactionnels
+    kpi_tx = fact_tx.groupby(["month","OrganisationId"], dropna=False).agg(
+        CA_Net_TTC=("CA_Net_TTC","sum"),
+        CA_Paid_With_Coupons=("CA_Paid_With_Coupons","sum"),
+        Estimated_Net_Margin_HT=("Estimated_Net_Margin_HT","sum"),
+    ).reset_index()
+
+    # Panier moyen global
+    pm2 = pm.groupby(["month","OrganisationId"], dropna=False)["Avg_Basket_Value"].mean().reset_index()
+    pmc2 = pmc.groupby(["month","OrganisationId"], dropna=False)["Avg_Basket_Value_With_Coupon"].mean().reset_index()
+
+    # Fusion finale
+    kpi = (kpi_tx.merge(churn, on=["month","OrganisationId"], how="left")
+                 .merge(pm2, on=["month","OrganisationId"], how="left")
+                 .merge(pmc2, on=["month","OrganisationId"], how="left")
+                 .merge(coupons_month, left_on=["month","OrganisationId"], right_on=["month", c_orgc], how="left")
+                 .fillna(0))
+
     kpi["Voucher_Share"] = np.where(kpi["CA_Net_TTC"]>0, kpi["CA_Paid_With_Coupons"]/kpi["CA_Net_TTC"], np.nan)
     kpi["Net_Margin_After_Loyalty"] = kpi["Estimated_Net_Margin_HT"] - kpi["Value_Used"]
+
     ws_kpi = _open_or_create(SPREADSHEET_ID, SHEET_KPI)
     _update_ws(ws_kpi, kpi)
+
 
     # ------------------------------
     # 6️⃣ ENVOI EMAIL
