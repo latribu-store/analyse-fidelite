@@ -147,7 +147,17 @@ if file_tx and file_cp:
         new_tx = fact_tx[~fact_tx["TransactionID"].isin(existing_ids)]
         merged_tx = pd.concat([current_tx, new_tx], ignore_index=True)
 
-    _update_ws(ws_tx, merged_tx)
+    def _update_ws(ws, df):
+        """Nettoie et envoie un DataFrame vers Google Sheets."""
+        # Conversion sécurisée : tout devient texte avant update
+        safe_df = (
+            df.astype(object)
+            .where(pd.notnull(df), "")
+            .applymap(lambda x: str(x) if not isinstance(x, str) else x)
+        )
+        values = [list(safe_df.columns)] + safe_df.values.tolist()
+        ws.clear()
+        ws.update("A1", values)
 
     # ------------------------------
     # 4️⃣ COUPONS (snapshot complet)
