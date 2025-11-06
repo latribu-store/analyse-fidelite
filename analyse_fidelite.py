@@ -127,38 +127,40 @@ if file_tx and file_cp:
     ]].drop_duplicates("TransactionID")
 
     # =====================================================
-    # 2️⃣ UPSERT TRANSACTIONS (VERSION DÉFINITIVE)
+    # 2️⃣ UPSERT TRANSACTIONS (VERSION ULTRA ROBUSTE)
     # =====================================================
     existing = con.execute("SELECT TransactionID FROM transactions").fetchdf()
     existing_ids = set(existing["TransactionID"]) if not existing.empty else set()
     new_tx = fact[~fact["TransactionID"].isin(existing_ids)]
 
     if not new_tx.empty:
-        # Récupère le schéma exact de la table DuckDB
-        schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall()]
-        
+        # Récupère le schéma exact (noms de colonnes valides uniquement)
+        schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall() if isinstance(r[0], str)]
+
         # Ajoute les colonnes manquantes
         for col in schema_db:
             if col not in new_tx.columns:
                 new_tx[col] = np.nan
 
-        # Réordonne et garde seulement les colonnes connues
+        # Réordonne et garde uniquement les colonnes connues
         new_tx = new_tx[[c for c in schema_db if c in new_tx.columns]]
 
-        # Typage sûr colonne par colonne
+        # Typage intelligent et sécurisé
         for col in new_tx.columns:
-            if col.lower() in ["validationdate"]:
+            cname = str(col).lower()
+            if "date" in cname:
                 new_tx[col] = pd.to_datetime(new_tx[col], errors="coerce")
-            elif col.lower() in ["cattc", "ca_ht", "purch_total_ht", "qty_ticket", "estimated_net_margin_ht"]:
+            elif any(x in cname for x in ["ca", "marge", "purch", "qty"]):
                 new_tx[col] = pd.to_numeric(new_tx[col], errors="coerce")
             else:
                 new_tx[col] = new_tx[col].astype(str)
 
-        # Insert proprement
+        # Append dans DuckDB
         con.append("transactions", new_tx)
         st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées à l’historique.")
     else:
         st.info("ℹ️ Aucune nouvelle transaction à insérer.")
+
 
 
     # =====================================================
