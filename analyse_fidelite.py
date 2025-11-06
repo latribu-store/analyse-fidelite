@@ -127,7 +127,7 @@ if file_tx and file_cp:
     ]].drop_duplicates("TransactionID")
 
     # =====================================================
-    # 2️⃣ UPSERT TRANSACTIONS (ANTI-CRASH)
+    # 2️⃣ UPSERT TRANSACTIONS (VERSION STABLE STREAMLIT)
     # =====================================================
     existing = con.execute("SELECT TransactionID FROM transactions").fetchdf()
     existing_ids = set(existing["TransactionID"]) if not existing.empty else set()
@@ -135,11 +135,15 @@ if file_tx and file_cp:
 
     if not new_tx.empty:
         schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall() if isinstance(r[0], str)]
+
+        # Ajoute colonnes manquantes
         for col in schema_db:
             if col not in new_tx.columns:
                 new_tx[col] = np.nan
+
         new_tx = new_tx[[c for c in schema_db if c in new_tx.columns]]
 
+        # Nettoyage & typage léger
         for col in new_tx.columns:
             cname = str(col).lower()
             if "date" in cname:
@@ -149,10 +153,19 @@ if file_tx and file_cp:
             else:
                 new_tx[col] = new_tx[col].astype(str).fillna("")
 
-        con.execute("INSERT INTO transactions SELECT * FROM new_tx", {'new_tx': new_tx})
-        st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées.")
+        # ✅ Étape clé : enregistrer le DataFrame comme vue temporaire
+        con.register("temp_new_tx", new_tx)
+
+        # ✅ Insertion fiable (pas de paramètres DataFrame)
+        con.execute("INSERT INTO transactions SELECT * FROM temp_new_tx")
+
+        # ✅ Nettoyer la vue
+        con.unregister("temp_new_tx")
+
+        st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées à l’historique.")
     else:
         st.info("ℹ️ Aucune nouvelle transaction à insérer.")
+
 
     # =====================================================
     # 3️⃣ UPSERT COUPONS (ANTI-CRASH)
