@@ -11,6 +11,9 @@ import gspread
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+import psutil
+
+
 
 # ============================================================
 # CONFIG
@@ -18,6 +21,8 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 st.set_page_config(page_title="🎯 Analyse Fidélité - KPI Automatisé", layout="wide")
 st.title("🎯 Analyse Fidélité - AutoMapping Keyneo ➜ KPI mensuels (Drive + Mail)")
 st.sidebar.button("♻️ Recharger / Redémarrer l'application", on_click=lambda: st.experimental_rerun())
+mem = psutil.virtual_memory()
+st.sidebar.markdown(f"💾 **Mémoire utilisée :** {mem.percent:.1f}% ({mem.used/1e9:.2f} Go / {mem.total/1e9:.2f} Go)")
 
 DATA_DIR = "data"
 TX_PATH = os.path.join(DATA_DIR, "transactions.parquet")
@@ -543,3 +548,14 @@ if file_tx and file_cp:
 
 else:
     st.info("➡️ Importez les fichiers Transactions et Coupons pour démarrer.")
+
+import gc
+
+# Nettoyage mémoire manuel
+for var in ["df_tx", "df_cp", "hist_tx", "kpi", "agg_ticket", "ticket_client", "ticket_non_client"]:
+    if var in locals():
+        del globals()[var]
+gc.collect()
+st.cache_data.clear()
+st.cache_resource.clear()
+st.success("🧹 Mémoire Streamlit nettoyée.")
