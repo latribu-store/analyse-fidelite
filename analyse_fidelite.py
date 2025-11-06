@@ -17,6 +17,7 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 # ============================================================
 st.set_page_config(page_title="🎯 Analyse Fidélité - KPI Automatisé", layout="wide")
 st.title("🎯 Analyse Fidélité - AutoMapping Keyneo ➜ KPI mensuels (Drive + Mail)")
+st.sidebar.button("♻️ Recharger / Redémarrer l'application", on_click=lambda: st.experimental_rerun())
 
 DATA_DIR = "data"
 TX_PATH = os.path.join(DATA_DIR, "transactions.parquet")
@@ -485,12 +486,52 @@ if file_tx and file_cp:
         except Exception as e:
             st.error(f"❌ Erreur lors de l'upload du fichier '{file_name}' : {e}")
 
+
+    def update_sheet(spreadsheet_id, sheet_name, df):
+        """Réécrit totalement la feuille KPI dans Google Sheets avec formatage FR."""
+        try:
+            sh = gspread_client.open_by_key(spreadsheet_id)
+
+            # 🔄 Supprime puis recrée la feuille (pour forcer l’actualisation)
+            try:
+                ws = sh.worksheet(sheet_name)
+                sh.del_worksheet(ws)
+            except gspread.WorksheetNotFound:
+                pass
+
+            ws = sh.add_worksheet(title=sheet_name, rows=str(len(df) + 10), cols=str(len(df.columns) + 5))
+
+            # 🧹 Prépare les données : décimales avec "," et dates propres
+            df_upload = df.copy()
+
+            for col in df_upload.select_dtypes(include=[float, int]).columns:
+                df_upload[col] = df_upload[col].apply(lambda x: "" if pd.isna(x) else str(x).replace(".", ","))
+
+            if "Date" in df_upload.columns:
+                df_upload["Date"] = df_upload["Date"].astype(str).str.replace("'", "")
+
+            # 📤 Envoi vers Google Sheets
+            ws.update(
+                "A1",
+                [list(df_upload.columns)] + df_upload.astype(str).values.tolist(),
+                value_input_option="USER_ENTERED"
+            )
+
+            st.success(f"✅ Feuille '{sheet_name}' mise à jour avec {len(df)} lignes.")
+        except Exception as e:
+            st.error(f"❌ Erreur mise à jour Google Sheets : {e}")
+
+
+    # --- Exécution des exports
     try:
         _ = upload_to_drive(TX_PATH, "transactions.parquet", "application/octet-stream")
         _ = upload_to_drive(CP_PATH, "coupons.parquet", "application/octet-stream")
         st.success("✅ Transactions et coupons exportés sur Google Drive.")
     except Exception as e:
         st.error(f"❌ Erreur export Drive : {e}")
+
+    # --- Mise à jour Google Sheets
+    update_sheet(SPREADSHEET_ID, "KPI_Mensuels", kpi)
 
 else:
     st.info("➡️ Importez les fichiers Transactions et Coupons pour démarrer.")
