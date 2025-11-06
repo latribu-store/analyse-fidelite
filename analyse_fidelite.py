@@ -123,11 +123,14 @@ def init_duckdb():
 # UPSERT TRANSACTIONS / COUPONS
 # ======================================
 def upsert_transactions(con, fact_df):
-    """Ajoute dans DuckDB uniquement les nouvelles transactions (tolérant et typé)."""
+    """Ajoute uniquement les nouvelles transactions (robuste au schéma DuckDB)."""
     if fact_df.empty:
         return
 
+    # Étape 1 : on nettoie et on force le typage
     df = fact_df.copy()
+    df.columns = [c.strip() for c in df.columns]
+
     expected_cols = {
         "TransactionID": str,
         "ValidationDate": "datetime64[ns]",
@@ -143,10 +146,13 @@ def upsert_transactions(con, fact_df):
         "CA_paid_with_coupons_HT": float,
         "Estimated_Net_Margin_HT": float,
     }
+
+    # Crée les colonnes manquantes
     for col, typ in expected_cols.items():
         if col not in df.columns:
             df[col] = np.nan
 
+    # Typage
     for col, typ in expected_cols.items():
         if typ == str:
             df[col] = df[col].astype(str)
@@ -157,12 +163,21 @@ def upsert_transactions(con, fact_df):
         elif typ == float:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
 
+    # Étape 2 : récupérer le schéma DuckDB actuel
+    cols_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall()]
+
+    # Étape 3 : ne garder et réordonner que les colonnes reconnues par la table
+    df = df[[c for c in cols_db if c in df.columns]]
+
+    # Étape 4 : filtrer les nouvelles transactions
     existing_ids = set(con.execute("SELECT TransactionID FROM transactions").fetchdf()["TransactionID"])
     new_fact = df[~df["TransactionID"].isin(existing_ids)]
     if new_fact.empty:
         return
 
+    # Étape 5 : insertion propre
     con.append("transactions", new_fact)
+
 
 def append_coupons(con, cp_df):
     if cp_df.empty:
