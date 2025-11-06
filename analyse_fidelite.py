@@ -202,8 +202,9 @@ if file_tx and file_cp:
         churn = clients.merge(newc, on=grp, how="left").merge(txc, on=grp, how="left").fillna(0)
         churn["Client qui reviennent"] = churn["Client"] - churn["Nouveau client"]
         churn["Recurrence (combien de fois un client revient par mois en moyenne)"] = np.where(
-            churn["Client"]>0, churn["TX_client"]/churn["Client"], np.nan
-        ).drop(columns=["TX_client"])
+        churn["Client"]>0, churn["TX_client"]/churn["Client"], np.nan
+        )
+        churn = churn.drop(columns=["TX_client"])
     else:
         churn = pd.DataFrame(columns=grp+["Client","Nouveau client","Client qui reviennent","Recurrence (combien de fois un client revient par mois en moyenne)"])
 
