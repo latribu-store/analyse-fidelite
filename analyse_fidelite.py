@@ -4,19 +4,22 @@ import numpy as np
 import duckdb
 import os
 
-# ----------------------------
-# Config
-# ----------------------------
-st.set_page_config(page_title="🎯 Analyse Fidélité — DuckDB ➜ KPI", layout="wide")
+# ------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------
+st.set_page_config(page_title="🎯 Analyse Fidélité — Historique DuckDB ➜ KPI", layout="wide")
 st.title("🎯 Analyse Fidélité — Historique DuckDB ➜ KPI mensuels")
 
 DUCKDB_PATH = "historique.duckdb"
 
-# ----------------------------
-# Utils
-# ----------------------------
-def _ensure_date(s): return pd.to_datetime(s, errors="coerce")
-def _month_str(s): return _ensure_date(s).dt.to_period("M").astype(str)
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+def _ensure_date(s): 
+    return pd.to_datetime(s, errors="coerce")
+
+def _month_str(s): 
+    return _ensure_date(s).dt.to_period("M").astype(str)
 
 def read_csv(uploaded):
     df = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig", on_bad_lines="skip")
@@ -24,16 +27,15 @@ def read_csv(uploaded):
     return df
 
 def pick_col(df, *candidates_lower):
-    """Retourne le nom de colonne original si son lowercase est dans candidates_lower."""
     lc_map = {c.lower(): c for c in df.columns}
     for cand in candidates_lower:
         if cand in lc_map:
             return lc_map[cand]
     return None
 
-# ----------------------------
-# DuckDB init (robuste)
-# ----------------------------
+# ------------------------------------------------------------
+# INIT DUCKDB
+# ------------------------------------------------------------
 def init_duckdb():
     if os.path.exists(DUCKDB_PATH):
         try:
@@ -78,50 +80,45 @@ def init_duckdb():
 
 con = init_duckdb()
 
-# ----------------------------
+# ------------------------------------------------------------
 # UI
-# ----------------------------
+# ------------------------------------------------------------
 st.sidebar.header("📂 Importer les fichiers")
 file_tx = st.sidebar.file_uploader("Transactions (CSV Keyneo)", type=["csv"])
 file_cp = st.sidebar.file_uploader("Coupons (CSV Keyneo)", type=["csv"])
 
 if file_tx and file_cp:
-    # 1) Lecture
+    # =====================================================
+    # 1️⃣ LECTURE
+    # =====================================================
     tx = read_csv(file_tx)
     cp = read_csv(file_cp)
 
-    # 2) Mapping EXACT mais insensible à la casse
-    # Transactions (tes colonnes stables)
+    # Colonnes Transactions (Keyneo)
     c_txid  = pick_col(tx, "operationid", "ticketnumber", "transactionid")
     c_date  = pick_col(tx, "validationdate", "operationdate", "date")
     c_org   = pick_col(tx, "organisationid", "organizationid")
     c_cust  = pick_col(tx, "customerid", "clientid")
     c_caht  = pick_col(tx, "linegrossamount", "montanthtligne", "cahtligne")
-    c_cost  = pick_col(tx, "linetotalpurchasingamount", "linetotalpurchasingamount")  # casse tolérée
+    c_cost  = pick_col(tx, "linetotalpurchasingamount", "linetotalpurchasingamount")
     c_qty   = pick_col(tx, "quantity", "qty", "linequantity")
     c_cattc = pick_col(tx, "totalamountttc", "totalamount", "totaltcc", "totalttc")
 
-    # Sécurités minimales
-    need_missing = [n for n,v in {
-        "ID":c_txid, "Date":c_date, "Org":c_org, "CA_HT":c_caht, "Coût":c_cost, "TTC":c_cattc
-    }.items() if v is None]
-    if need_missing:
-        st.error(f"❌ Colonnes manquantes dans Transactions (attendues) : {need_missing}\n"
+    if not c_txid or not c_date or not c_org or not c_caht or not c_cost or not c_cattc:
+        st.error("❌ Colonnes manquantes dans Transactions.\n"
                  f"Colonnes reçues : {list(tx.columns)}")
         st.stop()
 
-    # Normalisation des types
+    # Normalisation
     tx["TransactionID"]   = tx[c_txid].astype(str)
     tx["ValidationDate"]  = _ensure_date(tx[c_date])
     tx["OrganisationID"]  = tx[c_org].astype(str)
-    tx["CustomerID"]      = tx[c_cust].astype(str) if c_cust else None
+    tx["CustomerID"]      = tx[c_cust].astype(str) if c_cust else ""
     tx["month"]           = _month_str(tx["ValidationDate"])
-
     tx["CA_HT"]           = pd.to_numeric(tx[c_caht], errors="coerce").fillna(0.0)
     tx["Purch_Total_HT"]  = pd.to_numeric(tx[c_cost], errors="coerce").fillna(0.0)
     tx["CA_TTC"]          = pd.to_numeric(tx[c_cattc], errors="coerce").fillna(0.0)
     tx["Qty_Ticket"]      = pd.to_numeric(tx[c_qty], errors="coerce").fillna(0.0) if c_qty else 0.0
-
     tx["Estimated_Net_Margin_HT"] = tx["CA_HT"] - tx["Purch_Total_HT"]
 
     fact = tx[[
@@ -129,17 +126,39 @@ if file_tx and file_cp:
         "CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket","Estimated_Net_Margin_HT"
     ]].drop_duplicates("TransactionID")
 
-    # 3) Upsert transactions
+    # =====================================================
+    # 2️⃣ UPSERT TRANSACTIONS (ROBUSTE)
+    # =====================================================
     existing = con.execute("SELECT TransactionID FROM transactions").fetchdf()
     existing_ids = set(existing["TransactionID"]) if not existing.empty else set()
     new_tx = fact[~fact["TransactionID"].isin(existing_ids)]
+
     if not new_tx.empty:
+        schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall()]
+        for col in schema_db:
+            if col not in new_tx.columns:
+                new_tx[col] = np.nan
+        new_tx = new_tx[schema_db]
+        new_tx = new_tx.astype({
+            "TransactionID": "string",
+            "ValidationDate": "datetime64[ns]",
+            "month": "string",
+            "OrganisationID": "string",
+            "CustomerID": "string",
+            "CA_TTC": "float64",
+            "CA_HT": "float64",
+            "Purch_Total_HT": "float64",
+            "Qty_Ticket": "float64",
+            "Estimated_Net_Margin_HT": "float64",
+        }, errors="ignore")
         con.append("transactions", new_tx)
         st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées.")
     else:
-        st.info("ℹ️ Aucune nouvelle transaction.")
+        st.info("ℹ️ Aucune nouvelle transaction à insérer.")
 
-    # 4) Coupons (colonnes Keyneo stables, insensibles à la casse)
+    # =====================================================
+    # 3️⃣ UPSERT COUPONS (ROBUSTE)
+    # =====================================================
     cc_id   = pick_col(cp, "couponid")
     cc_org  = pick_col(cp, "organisationid", "organizationid")
     cc_emit = pick_col(cp, "creationdate")
@@ -163,15 +182,34 @@ if file_tx and file_cp:
         existing_cp = con.execute("SELECT CouponID FROM coupons").fetchdf()
         existing_cp_ids = set(existing_cp["CouponID"]) if not existing_cp.empty else set()
         new_cp = cp_norm[~cp_norm["CouponID"].isin(existing_cp_ids)]
+
         if not new_cp.empty:
+            schema_cp = [r[0] for r in con.execute("PRAGMA table_info('coupons')").fetchall()]
+            for col in schema_cp:
+                if col not in new_cp.columns:
+                    new_cp[col] = np.nan
+            new_cp = new_cp[schema_cp]
+            new_cp = new_cp.astype({
+                "CouponID": "string",
+                "OrganisationID": "string",
+                "UseDate": "datetime64[ns]",
+                "EmissionDate": "datetime64[ns]",
+                "month_use": "string",
+                "month_emit": "string",
+                "Amount_Initial": "float64",
+                "Amount_Remaining": "float64",
+                "Value_Used_Line": "float64"
+            }, errors="ignore")
             con.append("coupons", new_cp)
             st.success(f"✅ {len(new_cp)} nouveaux coupons ajoutés.")
         else:
-            st.info("ℹ️ Aucun nouveau coupon.")
+            st.info("ℹ️ Aucun nouveau coupon à insérer.")
     else:
         st.warning("⚠️ Fichier coupons incomplet (CouponID/OrganisationID manquants) — KPI partiel sans bons.")
 
-    # 5) KPI mensuels
+    # =====================================================
+    # 4️⃣ KPI MENSUELS
+    # =====================================================
     df_tx = con.execute("SELECT * FROM transactions").fetchdf()
     df_cp = con.execute("SELECT * FROM coupons").fetchdf()
 
@@ -201,7 +239,6 @@ if file_tx and file_cp:
     kpi = (base.merge(coupons_used, on=["month","OrganisationID"], how="left")
                 .merge(coupons_emis, on=["month","OrganisationID"], how="left"))
 
-    # Ratios
     kpi["Marge_net_HT_apres_coupon"] = kpi["Marge_net_HT_avant_coupon"] - kpi["Montant_coupons_utilise"].fillna(0)
     kpi["Taux_marge_HT_avant_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_avant_coupon"]/kpi["CA_HT"], np.nan)
     kpi["Taux_marge_HT_apres_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_apres_coupon"]/kpi["CA_HT"], np.nan)
