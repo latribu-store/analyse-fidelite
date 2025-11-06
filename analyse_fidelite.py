@@ -90,6 +90,19 @@ def _read_csv_tolerant(uploaded):
 # =========================================================
 # DUCKDB INIT
 # =========================================================
+import os
+
+# Forcer la réinitialisation si la table est mal initialisée
+if os.path.exists("historique.duckdb"):
+    try:
+        con_tmp = duckdb.connect("historique.duckdb")
+        cols = [r[0] for r in con_tmp.execute("PRAGMA table_info('transactions')").fetchall()]
+        if "TransactionID" not in cols:
+            os.remove("historique.duckdb")
+            st.warning("⚠️ Fichier DuckDB corrompu : recréé automatiquement.")
+    except Exception:
+        os.remove("historique.duckdb")
+        st.warning("⚠️ Fichier DuckDB supprimé et recréé (erreur d’ouverture).")
 def init_duckdb():
     con = duckdb.connect(DUCKDB_PATH)
     con.execute("""
