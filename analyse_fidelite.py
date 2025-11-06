@@ -6,8 +6,8 @@ import os
 # ============================================================
 # CONFIG
 # ============================================================
-st.set_page_config(page_title="🎯 Analyse Fidélité - Parquet Local", layout="wide")
-st.title("🎯 Analyse Fidélité - Parquet Local (stable et sans NaN)")
+st.set_page_config(page_title="🎯 Analyse Fidélité - Keyneo AutoMap (Local)", layout="wide")
+st.title("🎯 Analyse Fidélité - AutoMapping Keyneo ➜ KPI mensuels")
 
 DATA_DIR = "data"
 TX_PATH = os.path.join(DATA_DIR, "transactions.parquet")
@@ -24,7 +24,7 @@ def _month_str(s):
 
 def read_csv(uploaded):
     df = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig", on_bad_lines="skip", dtype=str)
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [c.strip().lower() for c in df.columns]
     return df
 
 def ensure_data_dir():
@@ -43,6 +43,13 @@ def load_parquet(path, columns):
 
 def save_parquet(df, path):
     df.to_parquet(path, index=False)
+
+def pick(df, *cands):
+    for c in cands:
+        c_clean = c.lower()
+        if c_clean in df.columns:
+            return c_clean
+    return None
 
 # ============================================================
 # SCHEMA
@@ -78,24 +85,44 @@ if file_tx and file_cp:
     hist_tx = load_parquet(TX_PATH, TX_COLS)
     hist_cp = load_parquet(CP_PATH, CP_COLS)
 
-    # 3️⃣ Normalisation transactions
-    for c in TX_COLS:
-        if c not in tx.columns:
-            tx[c] = ""
-    tx = tx[TX_COLS].copy()
+    # 3️⃣ Mapping automatique Keyneo
+    map_tx = {
+        "TransactionID": pick(tx, "ticketnumber", "transactionid", "operationid"),
+        "ValidationDate": pick(tx, "validationdate", "operationdate"),
+        "OrganisationID": pick(tx, "organisationid", "organizationid"),
+        "CustomerID": pick(tx, "customerid", "clientid"),
+        "ProductID": pick(tx, "productid", "sku", "ean"),
+        "Label": pick(tx, "label", "designation"),
+        "CA_TTC": pick(tx, "totalamount", "totalttc", "totaltcc"),
+        "CA_HT": pick(tx, "linegrossamount", "montanthtligne", "cahtligne"),
+        "Purch_Total_HT": pick(tx, "linetotalpurchasingamount", "purchasingamount", "costprice"),
+        "Qty_Ticket": pick(tx, "quantity", "qty", "linequantity")
+    }
+
+    for k,v in map_tx.items():
+        tx[k] = tx[v] if v in tx.columns else ""
+
+    # Conversion types
     tx["ValidationDate"] = _ensure_date(tx["ValidationDate"])
-    tx["CA_TTC"] = pd.to_numeric(tx["CA_TTC"], errors="coerce").fillna(0.0)
-    tx["CA_HT"] = pd.to_numeric(tx["CA_HT"], errors="coerce").fillna(0.0)
-    tx["Purch_Total_HT"] = pd.to_numeric(tx["Purch_Total_HT"], errors="coerce").fillna(0.0)
-    tx["Qty_Ticket"] = pd.to_numeric(tx["Qty_Ticket"], errors="coerce").fillna(0.0)
+    for col in ["CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket"]:
+        tx[col] = pd.to_numeric(tx[col], errors="coerce").fillna(0.0)
+
     tx["Estimated_Net_Margin_HT"] = tx["CA_HT"] - tx["Purch_Total_HT"]
     tx["month"] = _month_str(tx["ValidationDate"])
 
-    # 4️⃣ Normalisation coupons
-    for c in CP_COLS:
-        if c not in cp.columns:
-            cp[c] = ""
-    cp = cp[CP_COLS].copy()
+    # 4️⃣ Mapping automatique Coupons
+    map_cp = {
+        "CouponID": pick(cp, "couponid", "id"),
+        "OrganisationID": pick(cp, "organisationid", "organizationid"),
+        "EmissionDate": pick(cp, "creationdate", "issuedate"),
+        "UseDate": pick(cp, "usedate", "validationdate"),
+        "Amount_Initial": pick(cp, "initialvalue", "amount", "value"),
+        "Amount_Remaining": pick(cp, "amountremaining", "restant", "reste"),
+    }
+
+    for k,v in map_cp.items():
+        cp[k] = cp[v] if v in cp.columns else ""
+
     cp["EmissionDate"] = _ensure_date(cp["EmissionDate"])
     cp["UseDate"] = _ensure_date(cp["UseDate"])
     cp["Amount_Initial"] = pd.to_numeric(cp["Amount_Initial"], errors="coerce").fillna(0.0)
@@ -157,7 +184,7 @@ if file_tx and file_cp:
         coupons_used = pd.DataFrame(columns=["month","OrganisationID","Coupons_utilise","Montant_coupons_utilise"])
         coupons_emis = pd.DataFrame(columns=["month","OrganisationID","Coupons_emis","Montant_coupons_emis"])
 
-    # ✅ Harmonisation des types avant merge
+    # Harmonisation des types avant merge
     for df in [base, coupons_used, coupons_emis]:
         for col in ["month", "OrganisationID"]:
             if col not in df.columns:
@@ -177,10 +204,9 @@ if file_tx and file_cp:
     kpi["Prix_moyen_article_vendu_HT"] = np.where(kpi["Qty_total"]>0, kpi["CA_HT"]/kpi["Qty_total"], np.nan)
     kpi["Date"] = pd.to_datetime(kpi["month"], errors="coerce").dt.strftime("%d/%m/%Y")
 
-    # ✅ Nettoyage final : remplace tous les NaN par vide
+    # Nettoyage final
     kpi = kpi.fillna("")
 
-    # Affichage
     st.subheader("📊 Aperçu KPI mensuel")
     st.dataframe(kpi.head(20))
 
