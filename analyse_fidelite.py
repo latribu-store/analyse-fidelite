@@ -238,6 +238,18 @@ if file_tx and file_cp:
     cust_sets["Prev"] = cust_sets.groupby("OrganisationID")["CustSet"].shift(1)
     cust_sets["Retention_rate"] = cust_sets.apply(lambda r: len(r["Prev"].intersection(r["CustSet"])) / len(r["Prev"]) if isinstance(r["Prev"], set) and len(r["Prev"])>0 else "", axis=1)
     ret = cust_sets[["month","OrganisationID","Retention_rate"]]
+    # 🔧 Harmonisation des colonnes avant merge KPI
+    for df in [base, new_ret, ret, coupons_used, coupons_emis]:
+        if "OrganisationID" not in df.columns:
+            # essaie de récupérer une version minuscule si présente
+            if "organisationid" in df.columns:
+                df["OrganisationID"] = df["organisationid"]
+            else:
+                df["OrganisationID"] = ""
+        df["OrganisationID"] = df["OrganisationID"].astype(str).fillna("")
+        if "month" not in df.columns:
+            df["month"] = ""
+        df["month"] = df["month"].astype(str).fillna("")
 
     # --- Merge KPI
     kpi = (base.merge(new_ret, on=["month","OrganisationID"], how="left")
