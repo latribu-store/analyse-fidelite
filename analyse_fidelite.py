@@ -141,6 +141,9 @@ if file_tx and file_cp:
     ).reset_index()
 
     if not df_cp.empty:
+        df_cp["month_use"] = _month_str(df_cp["UseDate"])
+        df_cp["month_emit"] = _month_str(df_cp["EmissionDate"])
+
         coupons_used = df_cp.dropna(subset=["UseDate"]).groupby(["month_use","OrganisationID"]).agg(
             Coupons_utilise=("CouponID","nunique"),
             Montant_coupons_utilise=("Value_Used_Line","sum")
@@ -154,8 +157,15 @@ if file_tx and file_cp:
         coupons_used = pd.DataFrame(columns=["month","OrganisationID","Coupons_utilise","Montant_coupons_utilise"])
         coupons_emis = pd.DataFrame(columns=["month","OrganisationID","Coupons_emis","Montant_coupons_emis"])
 
+    # ✅ sécurité : toujours avoir les colonnes nécessaires
+    for df in [base, coupons_used, coupons_emis]:
+        for col in ["month", "OrganisationID"]:
+            if col not in df.columns:
+                df[col] = np.nan
+
     kpi = (base.merge(coupons_used, on=["month","OrganisationID"], how="left")
                 .merge(coupons_emis, on=["month","OrganisationID"], how="left"))
+
 
     kpi["Marge_net_HT_apres_coupon"] = kpi["Marge_net_HT_avant_coupon"] - kpi["Montant_coupons_utilise"].fillna(0)
     kpi["Taux_marge_HT_avant_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_avant_coupon"]/kpi["CA_HT"], np.nan)
