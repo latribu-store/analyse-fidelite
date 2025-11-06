@@ -6,8 +6,8 @@ import os
 # ============================================================
 # CONFIG
 # ============================================================
-st.set_page_config(page_title="🎯 Analyse Fidélité - Version Parquet (Locale)", layout="wide")
-st.title("🎯 Analyse Fidélité - Version Parquet (Locale & Stable)")
+st.set_page_config(page_title="🎯 Analyse Fidélité - Parquet Local", layout="wide")
+st.title("🎯 Analyse Fidélité - Parquet Local (stable et sans NaN)")
 
 DATA_DIR = "data"
 TX_PATH = os.path.join(DATA_DIR, "transactions.parquet")
@@ -157,16 +157,17 @@ if file_tx and file_cp:
         coupons_used = pd.DataFrame(columns=["month","OrganisationID","Coupons_utilise","Montant_coupons_utilise"])
         coupons_emis = pd.DataFrame(columns=["month","OrganisationID","Coupons_emis","Montant_coupons_emis"])
 
-    # ✅ sécurité : toujours avoir les colonnes nécessaires
+    # ✅ Harmonisation des types avant merge
     for df in [base, coupons_used, coupons_emis]:
         for col in ["month", "OrganisationID"]:
             if col not in df.columns:
-                df[col] = np.nan
+                df[col] = ""
+            df[col] = df[col].astype(str).fillna("")
 
     kpi = (base.merge(coupons_used, on=["month","OrganisationID"], how="left")
                 .merge(coupons_emis, on=["month","OrganisationID"], how="left"))
 
-
+    # Calculs complémentaires
     kpi["Marge_net_HT_apres_coupon"] = kpi["Marge_net_HT_avant_coupon"] - kpi["Montant_coupons_utilise"].fillna(0)
     kpi["Taux_marge_HT_avant_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_avant_coupon"]/kpi["CA_HT"], np.nan)
     kpi["Taux_marge_HT_apres_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_apres_coupon"]/kpi["CA_HT"], np.nan)
@@ -174,8 +175,12 @@ if file_tx and file_cp:
                                                     kpi["Montant_coupons_utilise"]/kpi["Montant_coupons_emis"], np.nan)
     kpi["Panier_moyen_HT"] = np.where(kpi["Transactions"]>0, kpi["CA_HT"]/kpi["Transactions"], np.nan)
     kpi["Prix_moyen_article_vendu_HT"] = np.where(kpi["Qty_total"]>0, kpi["CA_HT"]/kpi["Qty_total"], np.nan)
-    kpi["Date"] = pd.to_datetime(kpi["month"]).dt.strftime("%d/%m/%Y")
+    kpi["Date"] = pd.to_datetime(kpi["month"], errors="coerce").dt.strftime("%d/%m/%Y")
 
+    # ✅ Nettoyage final : remplace tous les NaN par vide
+    kpi = kpi.fillna("")
+
+    # Affichage
     st.subheader("📊 Aperçu KPI mensuel")
     st.dataframe(kpi.head(20))
 
