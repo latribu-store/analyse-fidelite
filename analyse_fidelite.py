@@ -180,6 +180,18 @@ if file_tx and file_cp:
     # 👇👇👇
     # [on garde ton bloc KPI complet ici]
     # 👆👆👆
+    
+    # ============================================================
+    # CONSTRUCTION DU TABLEAU KPI MENSUEL
+    # ============================================================
+
+    try:
+        # Ici on suppose que merged_tx et merged_cp ont été créés dans ton flux
+        df_kpi_mensuels = compute_kpi_mensuels(merged_tx, merged_cp)
+        st.success("📊 Table KPI mensuelle générée avec succès.")
+    except Exception as e:
+        st.error(f"❌ Erreur lors du calcul des KPI mensuels : {e}")
+        st.stop()
 
     # ============================================================
     # EXPORTS LOCAUX / DRIVE / SHEETS
