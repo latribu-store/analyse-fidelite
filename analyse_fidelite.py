@@ -127,6 +127,9 @@ if file_tx and file_cp:
     cp["UseDate"] = _ensure_date(cp["UseDate"])
     cp["Amount_Initial"] = pd.to_numeric(cp["Amount_Initial"], errors="coerce").fillna(0.0)
     cp["Amount_Used"] = pd.to_numeric(cp["Amount_Used"], errors="coerce").fillna(0.0)
+    st.write("🧩 Colonnes détectées dans le fichier coupons :", list(cp.columns))
+    st.write("Mapping utilisé :", map_cp)
+
 
     # Montant utilisé = directement la colonne 'amount' (Keyneo)
     cp["Value_Used_Line"] = cp["Amount_Used"].clip(lower=0.0)
