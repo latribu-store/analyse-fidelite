@@ -110,35 +110,30 @@ if file_tx and file_cp:
     tx["Estimated_Net_Margin_HT"] = tx["CA_HT"] - tx["Purch_Total_HT"]
     tx["month"] = _month_str(tx["ValidationDate"])
 
-    # 4️⃣ Mapping automatique Coupons (PATCH ROBUSTE)
+    # 4️⃣ Mapping automatique Coupons (version Keyneo corrigée)
     map_cp = {
         "CouponID": pick(cp, "couponid", "id"),
         "OrganisationID": pick(cp, "organisationid", "organizationid"),
         "EmissionDate": pick(cp, "creationdate", "issuedate"),
         "UseDate": pick(cp, "usedate", "validationdate"),
-        "Amount_Initial": pick(cp, "initialvalue", "initial_amount", "valeur_initiale"),
-        "Amount_Remaining": pick(cp, "amountremaining", "remaining", "reste", "restant"),
+        "Amount_Initial": pick(cp, "initialvalue", "value", "montantinitial"),
+        "Amount_Used": pick(cp, "amount", "valeurutilisee", "usedamount"),
     }
-    src_amount_used = pick(cp, "amount_used", "amount", "value_used", "montant_utilise")
 
     for k, v in map_cp.items():
         cp[k] = cp[v] if v and v in cp.columns else ""
 
     cp["EmissionDate"] = _ensure_date(cp["EmissionDate"])
     cp["UseDate"] = _ensure_date(cp["UseDate"])
+    cp["Amount_Initial"] = pd.to_numeric(cp["Amount_Initial"], errors="coerce").fillna(0.0)
+    cp["Amount_Used"] = pd.to_numeric(cp["Amount_Used"], errors="coerce").fillna(0.0)
 
-    for cnum in ["Amount_Initial", "Amount_Remaining"]:
-        cp[cnum] = pd.to_numeric(cp[cnum], errors="coerce")
+    # Montant utilisé = directement la colonne 'amount' (Keyneo)
+    cp["Value_Used_Line"] = cp["Amount_Used"].clip(lower=0.0)
 
-    if map_cp["Amount_Initial"] and map_cp["Amount_Remaining"]:
-        cp["Value_Used_Line"] = (cp["Amount_Initial"].fillna(0) - cp["Amount_Remaining"].fillna(0)).clip(lower=0.0)
-    elif src_amount_used and src_amount_used in cp.columns:
-        cp["Value_Used_Line"] = pd.to_numeric(cp[src_amount_used], errors="coerce").fillna(0.0).clip(lower=0.0)
-    else:
-        cp["Value_Used_Line"] = 0.0
-
-    cp["month_use"]  = _month_str(cp["UseDate"])
+    cp["month_use"] = _month_str(cp["UseDate"])
     cp["month_emit"] = _month_str(cp["EmissionDate"])
+
 
     # 5️⃣ Append-only sans doublons
     tx["TransactionID"] = tx["TransactionID"].astype(str)
