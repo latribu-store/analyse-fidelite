@@ -4,19 +4,16 @@ import numpy as np
 import duckdb, json, re, smtplib, requests
 from datetime import datetime
 from email.message import EmailMessage
-
 import gspread
 from google.oauth2 import service_account
 
-# =========================
-# PAGE CONFIG
-# =========================
-st.set_page_config(page_title="Analyse Fidélité — DuckDB ➜ KPI Sheets", layout="wide")
+# ======================================
+# CONFIG GÉNÉRALE
+# ======================================
+st.set_page_config(page_title="Analyse Fidélité — La Tribu", layout="wide")
 st.title("🎯 Analyse Fidélité — Historique DuckDB ➜ KPI mensuels (Google Sheets)")
 
-# =========================
-# SECRETS & CONFIG
-# =========================
+# === Secrets
 SPREADSHEET_ID = st.secrets["sheets"]["spreadsheet_id"]
 SHEET_KPI = "KPI_Mensuels"
 
@@ -31,9 +28,9 @@ GCP_JSON_DRIVE_FILE_ID = st.secrets["gcp"]["json_drive_file_id"]
 
 DUCKDB_PATH = "historique.duckdb"
 
-# =========================
+# ======================================
 # HELPERS
-# =========================
+# ======================================
 def _ensure_date(s): return pd.to_datetime(s, errors="coerce")
 def _month_str(s): return _ensure_date(s).dt.to_period("M").astype(str)
 def _norm_cols(df): return df.rename(columns={c: re.sub(r"[^a-z0-9]", "", c.lower()) for c in df.columns})
@@ -43,7 +40,9 @@ def _pick(df, *cands):
         if k in df.columns: return k
     return None
 
-# --- Authentification Google via file_id
+# ======================================
+# GOOGLE AUTH (via JSON file_id)
+# ======================================
 def get_gcp_creds():
     url = f"https://drive.google.com/uc?id={GCP_JSON_DRIVE_FILE_ID}"
     resp = requests.get(url)
@@ -62,7 +61,7 @@ def ws_open_or_create(spreadsheet_id, tab_name):
     try:
         return sh.worksheet(tab_name)
     except Exception:
-        return sh.add_worksheet(title=tab_name, rows=2, cols=100)
+        return sh.add_worksheet(title=tab_name, rows=2, cols=80)
 
 def ws_overwrite_small(ws, df):
     safe = df.copy()
@@ -83,9 +82,9 @@ def _read_csv_tolerant(uploaded):
             df[col] = try_num
     return df
 
-# =========================
-# DUCKDB INITIALISATION
-# =========================
+# ======================================
+# INITIALISATION DUCKDB
+# ======================================
 def init_duckdb():
     con = duckdb.connect(DUCKDB_PATH)
     con.execute("""
@@ -120,26 +119,44 @@ def init_duckdb():
     """)
     return con
 
-# --- Insertions robustes sans BinderException
+# ======================================
+# UPSERT TRANSACTIONS / COUPONS
+# ======================================
 def upsert_transactions(con, fact_df):
-    """Ajoute dans DuckDB uniquement les nouvelles transactions (avec typage sûr)."""
+    """Ajoute dans DuckDB uniquement les nouvelles transactions (tolérant et typé)."""
     if fact_df.empty:
         return
 
-    # Nettoyage / typage strict
     df = fact_df.copy()
-    df["TransactionID"] = df["TransactionID"].astype(str)
-    df["OrganisationID"] = df["OrganisationID"].astype(str)
-    df["CustomerID"] = df["CustomerID"].astype(str)
-    df["month"] = df["month"].astype(str)
-    df["ValidationDate"] = pd.to_datetime(df["ValidationDate"], errors="coerce")
-    df["is_client"] = df["is_client"].astype(bool)
-    df["Has_Coupon"] = df["Has_Coupon"].astype(bool)
-    num_cols = ["CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket","CA_paid_with_coupons_HT","Estimated_Net_Margin_HT"]
-    for c in num_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce").astype(float)
+    expected_cols = {
+        "TransactionID": str,
+        "ValidationDate": "datetime64[ns]",
+        "month": str,
+        "OrganisationID": str,
+        "CustomerID": str,
+        "is_client": bool,
+        "CA_TTC": float,
+        "CA_HT": float,
+        "Purch_Total_HT": float,
+        "Qty_Ticket": float,
+        "Has_Coupon": bool,
+        "CA_paid_with_coupons_HT": float,
+        "Estimated_Net_Margin_HT": float,
+    }
+    for col, typ in expected_cols.items():
+        if col not in df.columns:
+            df[col] = np.nan
 
-    # Vérifie les ID déjà existants
+    for col, typ in expected_cols.items():
+        if typ == str:
+            df[col] = df[col].astype(str)
+        elif typ == bool:
+            df[col] = df[col].astype(bool)
+        elif typ == "datetime64[ns]":
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+        elif typ == float:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+
     existing_ids = set(con.execute("SELECT TransactionID FROM transactions").fetchdf()["TransactionID"])
     new_fact = df[~df["TransactionID"].isin(existing_ids)]
     if new_fact.empty:
@@ -147,15 +164,14 @@ def upsert_transactions(con, fact_df):
 
     con.append("transactions", new_fact)
 
-
 def append_coupons(con, cp_df):
     if cp_df.empty:
         return
     con.append("coupons", cp_df)
 
-# =========================
-# BUILD TABLES
-# =========================
+# ======================================
+# CONSTRUCTION DES TABLES
+# ======================================
 def _build_fact_from_transactions(tx):
     c_txid  = _pick(tx, "ticketnumber", "transactionid", "operationid")
     c_total = _pick(tx, "totalamount", "totaltcc", "totalttc")
@@ -209,9 +225,9 @@ def _build_coupon_table(cp):
     cp["month_emit"] = _month_str(cp["EmissionDate"])
     return cp.rename(columns={c_couponid:"CouponID", c_orgc:"OrganisationID"})
 
-# =========================
+# ======================================
 # MAIL
-# =========================
+# ======================================
 def send_mail(to_list, subject, body):
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -223,9 +239,9 @@ def send_mail(to_list, subject, body):
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
 
-# =========================
+# ======================================
 # STREAMLIT UI
-# =========================
+# ======================================
 st.sidebar.header("📂 Importer les fichiers")
 file_tx = st.sidebar.file_uploader("Transactions (CSV Keyneo)", type=["csv"])
 file_cp = st.sidebar.file_uploader("Coupons (CSV Keyneo)", type=["csv"])
@@ -252,14 +268,8 @@ if file_tx and file_cp:
 
     st.success(f"✅ Base mise à jour : +{new_tx} transactions, +{new_cp} coupons")
 
-    # Calcul KPI
-    fact_all = con.execute("SELECT * FROM transactions").fetch_df()
-    coupons_all = con.execute("SELECT * FROM coupons").fetch_df()
-    st.info(f"Historique total : {len(fact_all)} transactions / {len(coupons_all)} coupons")
-
-    # ➜ ici tu peux appeler compute_kpi(con) si tu veux réintégrer le bloc KPI complet.
-    # (il reste inchangé par rapport à la version précédente)
-    st.info("ℹ️ KPI calculé ensuite via compute_kpi(con) et exporté dans Sheets.")
-
+    st.info(f"Base historique : {after_tx} transactions / {after_cp} coupons")
+    
+    # À ce stade, tu peux appeler compute_kpi(con) pour calculer et exporter tes KPI mensuels vers Sheets.
 else:
     st.info("➡️ Importez vos CSV Transactions et Coupons pour démarrer.")
