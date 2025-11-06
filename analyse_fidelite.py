@@ -108,54 +108,77 @@ if file_tx and file_cp:
     tx["month"] = _month_str(tx["ValidationDate"])
     tx["Estimated_Net_Margin_HT"] = tx["CA_HT"] - tx["Purch_Total_HT"]
 
-    # ------------------------
-    # 2️⃣ UPSERT TRANSACTIONS
-    # ------------------------
-    existing_ids = set(con.execute("SELECT TransactionID FROM transactions").fetchdf()["TransactionID"].astype(str))
-    new_tx = tx[~tx["TransactionID"].astype(str).isin(existing_ids)].copy()
-
-    if not new_tx.empty:
-        new_tx = new_tx.fillna("")
-        for col in ["CA_TTC", "CA_HT", "Purch_Total_HT", "Qty_Ticket"]:
-            new_tx[col] = pd.to_numeric(new_tx[col], errors="coerce").fillna(0.0)
-        new_tx["ValidationDate"] = _ensure_date(new_tx["ValidationDate"]).fillna(pd.Timestamp("1970-01-01"))
-
-        con.register("temp_tx", new_tx)
-        con.execute("INSERT INTO transactions SELECT * FROM temp_tx")
-        con.unregister("temp_tx")
-
-        st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées à l’historique.")
-    else:
-        st.info("ℹ️ Aucune nouvelle transaction à insérer.")
-
-    # ------------------------
-    # 3️⃣ UPSERT COUPONS
-    # ------------------------
-    needed_cp = [
-        "CouponID", "OrganisationID", "EmissionDate", "UseDate",
-        "Amount_Initial", "Amount_Remaining"
+    # =====================================================
+    # 2️⃣ UPSERT TRANSACTIONS (FIX FINAL)
+    # =====================================================
+    existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    tx_cols = [
+        "TransactionID","ValidationDate","OrganisationID","CustomerID",
+        "ProductID","Label","CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket"
     ]
-    for c in needed_cp:
-        if c not in cp.columns:
-            cp[c] = ""
 
-    cp = cp[needed_cp].copy()
-    cp["EmissionDate"] = _ensure_date(cp["EmissionDate"])
-    cp["UseDate"] = _ensure_date(cp["UseDate"])
-    cp["Amount_Initial"] = pd.to_numeric(cp["Amount_Initial"], errors="coerce").fillna(0.0)
-    cp["Amount_Remaining"] = pd.to_numeric(cp["Amount_Remaining"], errors="coerce").fillna(0.0)
-    cp["Value_Used_Line"] = (cp["Amount_Initial"] - cp["Amount_Remaining"]).clip(lower=0.0)
+    # Nettoyage et typage strict
+    new_tx = tx[tx_cols].copy()
+    new_tx["ValidationDate"] = _ensure_date(new_tx["ValidationDate"]).fillna(pd.Timestamp("1970-01-01"))
+    for c in ["CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket"]:
+        new_tx[c] = pd.to_numeric(new_tx[c], errors="coerce").fillna(0.0)
+    for c in ["TransactionID","OrganisationID","CustomerID","ProductID","Label"]:
+        new_tx[c] = new_tx[c].astype(str).fillna("")
 
-    existing_cp_ids = set(con.execute("SELECT CouponID FROM coupons").fetchdf()["CouponID"].astype(str))
-    new_cp = cp[~cp["CouponID"].astype(str).isin(existing_cp_ids)].copy()
+    # ✅ Étape sûre : créer une vue temporaire DuckDB
+    con.register("temp_tx", new_tx)
 
-    if not new_cp.empty:
-        con.register("temp_cp", new_cp)
-        con.execute("INSERT INTO coupons SELECT * FROM temp_cp")
-        con.unregister("temp_cp")
-        st.success(f"✅ {len(new_cp)} nouveaux coupons ajoutés à l’historique.")
+    if "transactions" not in existing_tables:
+        con.execute("CREATE TABLE transactions AS SELECT * FROM temp_tx")
+        st.success(f"✅ Table 'transactions' créée ({len(new_tx)} lignes).")
     else:
-        st.info("ℹ️ Aucun nouveau coupon à insérer.")
+        # Vérifie les colonnes existantes
+        existing_cols = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall()]
+        common_cols = [c for c in tx_cols if c in existing_cols]
+        insert_sql = f"""
+            INSERT INTO transactions ({', '.join(common_cols)})
+            SELECT {', '.join(common_cols)} FROM temp_tx
+        """
+        con.execute(insert_sql)
+        st.success(f"✅ {len(new_tx)} nouvelles transactions insérées.")
+
+    con.unregister("temp_tx")
+
+
+    # =====================================================
+    # 3️⃣ UPSERT COUPONS (FIX FINAL)
+    # =====================================================
+    existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    cp_cols = [
+        "CouponID","OrganisationID","EmissionDate","UseDate",
+        "Amount_Initial","Amount_Remaining","Value_Used_Line"
+    ]
+
+    new_cp = cp[cp_cols].copy()
+    new_cp["EmissionDate"] = _ensure_date(new_cp["EmissionDate"]).fillna(pd.Timestamp("1970-01-01"))
+    new_cp["UseDate"] = _ensure_date(new_cp["UseDate"]).fillna(pd.Timestamp("1970-01-01"))
+    for c in ["Amount_Initial","Amount_Remaining","Value_Used_Line"]:
+        new_cp[c] = pd.to_numeric(new_cp[c], errors="coerce").fillna(0.0)
+    for c in ["CouponID","OrganisationID"]:
+        new_cp[c] = new_cp[c].astype(str).fillna("")
+
+    con.register("temp_cp", new_cp)
+
+    if "coupons" not in existing_tables:
+        con.execute("CREATE TABLE coupons AS SELECT * FROM temp_cp")
+        st.success(f"✅ Table 'coupons' créée ({len(new_cp)} lignes).")
+    else:
+        existing_cols = [r[0] for r in con.execute("PRAGMA table_info('coupons')").fetchall()]
+        common_cols = [c for c in cp_cols if c in existing_cols]
+        insert_sql = f"""
+            INSERT INTO coupons ({', '.join(common_cols)})
+            SELECT {', '.join(common_cols)} FROM temp_cp
+        """
+        con.execute(insert_sql)
+        st.success(f"✅ {len(new_cp)} nouveaux coupons insérés.")
+
+    con.unregister("temp_cp")
+
 
     # ------------------------
     # 4️⃣ KPI MENSUEL
