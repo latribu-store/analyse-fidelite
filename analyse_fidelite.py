@@ -404,20 +404,26 @@ if file_tx and file_cp:
             # Récupère le dossier Drive depuis les secrets Streamlit
             folder_id = st.secrets["gcp"].get("folder_id", "")
 
+        # ✅ Gestion des Drive partagés (ID commençant par 0A)
         file_metadata = {"name": file_name}
         if folder_id:
-            file_metadata["parents"] = [folder_id]
+            if folder_id.startswith("0A"):  # ID d’un Drive partagé (Shared Drive)
+                file_metadata["driveId"] = folder_id
+                file_metadata["parents"] = []  # racine du Drive partagé
+            else:  # Dossier classique ou sous-dossier dans un Drive partagé
+                file_metadata["parents"] = [folder_id]
 
+        # Préparation du fichier à uploader
         media = MediaIoBaseUpload(open(file_path, "rb"), mimetype=mime_type, resumable=True)
 
         # Recherche si un fichier du même nom existe déjà dans le dossier
         query = f"name='{file_name}' and trashed=false"
-        if folder_id:
+        if folder_id and not folder_id.startswith("0A"):
             query += f" and '{folder_id}' in parents"
 
         existing = (
             drive_service.files()
-            .list(q=query, fields="files(id)")
+            .list(q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True)
             .execute()
             .get("files", [])
         )
@@ -426,12 +432,20 @@ if file_tx and file_cp:
             if existing:
                 # Mise à jour du fichier existant
                 file_id = existing[0]["id"]
-                drive_service.files().update(fileId=file_id, media_body=media).execute()
-            else:
-                # Création d’un nouveau fichier dans le dossier partagé
-                drive_service.files().create(
-                    body=file_metadata, media_body=media, fields="id"
+                drive_service.files().update(
+                    fileId=file_id,
+                    media_body=media,
+                    supportsAllDrives=True
                 ).execute()
+            else:
+                # Création d’un nouveau fichier dans le dossier/Drive partagé
+                drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id",
+                    supportsAllDrives=True
+                ).execute()
+
             st.success(f"✅ Fichier '{file_name}' exporté sur Google Drive.")
         except Exception as e:
             st.error(f"❌ Erreur lors de l'upload du fichier '{file_name}' : {e}")
@@ -444,6 +458,7 @@ if file_tx and file_cp:
         st.success("✅ Transactions et coupons exportés sur Google Drive.")
     except Exception as e:
         st.error(f"❌ Erreur export Drive : {e}")
+
 
 
     # --- Export vers Google Sheets (KPI)
