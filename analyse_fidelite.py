@@ -85,7 +85,7 @@ if file_tx and file_cp:
     hist_tx = load_parquet(TX_PATH, TX_COLS)
     hist_cp = load_parquet(CP_PATH, CP_COLS)
 
-    # 3️⃣ Mapping automatique Keyneo
+    # 3️⃣ Mapping automatique Keyneo Transactions
     map_tx = {
         "TransactionID": pick(tx, "ticketnumber", "transactionid", "operationid"),
         "ValidationDate": pick(tx, "validationdate", "operationdate"),
@@ -110,35 +110,31 @@ if file_tx and file_cp:
     tx["Estimated_Net_Margin_HT"] = tx["CA_HT"] - tx["Purch_Total_HT"]
     tx["month"] = _month_str(tx["ValidationDate"])
 
-    # 4️⃣ Mapping automatique Coupons (version Keyneo corrigée)
+    # 4️⃣ Mapping automatique Coupons (Keyneo corrigé)
     map_cp = {
         "CouponID": pick(cp, "couponid", "id"),
         "OrganisationID": pick(cp, "organisationid", "organizationid"),
         "EmissionDate": pick(cp, "creationdate", "issuedate"),
         "UseDate": pick(cp, "usedate", "validationdate"),
         "Amount_Initial": pick(cp, "initialvalue", "value", "montantinitial"),
-        "Amount_Used": pick(cp, "amount", "valeurutilisee", "usedamount"),
+        "Amount_Remaining": pick(cp, "amount", "reste", "remaining"),  # 'amount' = restant
     }
 
     for k, v in map_cp.items():
         cp[k] = cp[v] if v and v in cp.columns else ""
 
+    # Conversion décimales françaises
+    for col in ["Amount_Initial", "Amount_Remaining"]:
+        cp[col] = cp[col].astype(str).str.replace(",", ".", regex=False)
+        cp[col] = pd.to_numeric(cp[col], errors="coerce").fillna(0.0)
+
     cp["EmissionDate"] = _ensure_date(cp["EmissionDate"])
     cp["UseDate"] = _ensure_date(cp["UseDate"])
-    # Normalisation des décimales françaises (ex: "5,20" → "5.20")
-    cp["Amount_Initial"] = cp["Amount_Initial"].astype(str).str.replace(",", ".", regex=False)
-    cp["Amount_Used"] = cp["Amount_Used"].astype(str).str.replace(",", ".", regex=False)
 
-    # Conversion numérique
-    cp["Amount_Initial"] = pd.to_numeric(cp["Amount_Initial"], errors="coerce").fillna(0.0)
-    cp["Amount_Used"] = pd.to_numeric(cp["Amount_Used"], errors="coerce").fillna(0.0)
-
-    # Montant utilisé = directement la colonne 'amount' (Keyneo)
-    cp["Value_Used_Line"] = cp["Amount_Used"].clip(lower=0.0)
-
+    # Correction : montant utilisé = initial - restant
+    cp["Value_Used_Line"] = (cp["Amount_Initial"] - cp["Amount_Remaining"]).clip(lower=0.0)
     cp["month_use"] = _month_str(cp["UseDate"])
     cp["month_emit"] = _month_str(cp["EmissionDate"])
-
 
     # 5️⃣ Append-only sans doublons
     tx["TransactionID"] = tx["TransactionID"].astype(str)
@@ -158,7 +154,7 @@ if file_tx and file_cp:
     st.success(f"✅ {len(new_tx)} nouvelles transactions et {len(new_cp)} nouveaux coupons ajoutés à l’historique local.")
 
     # ======================================================
-    # 6️⃣ KPI Mensuel (corrigé)
+    # 6️⃣ KPI Mensuel
     # ======================================================
     df_tx = hist_tx.copy()
     df_cp = hist_cp.copy()
@@ -215,77 +211,26 @@ if file_tx and file_cp:
         Montant_coupons_emis=("Amount_Initial","sum")
     ).rename(columns={"month_emit":"month"}).reset_index()
 
-    # --- Clients / Nouveaux / Récurrents / Rétention
-    ticket_client = agg_ticket[agg_ticket["CustomerID"].str.len() > 0].copy()
-
-    clients_mois = ticket_client.groupby(["month","OrganisationID"])["CustomerID"].nunique().reset_index(name="Clients")
-    first_seen = ticket_client.groupby(["OrganisationID","CustomerID"])["ValidationDate"].min().reset_index(name="FirstDate")
-    ticket_client = ticket_client.merge(first_seen, on=["OrganisationID","CustomerID"], how="left")
-    ticket_client["IsNewThisMonth"] = (ticket_client["ValidationDate"].dt.to_period("M") == ticket_client["FirstDate"].dt.to_period("M"))
-
-    nouveaux = ticket_client[ticket_client["IsNewThisMonth"]].groupby(["month","OrganisationID"])["CustomerID"].nunique().reset_index(name="Nouveau_client")
-    tx_client = ticket_client.groupby(["month","OrganisationID"])["TransactionID"].nunique().reset_index(name="Transactions_Client")
-
-    new_ret = (clients_mois.merge(nouveaux, on=["month","OrganisationID"], how="left")
-                        .merge(tx_client, on=["month","OrganisationID"], how="left")
-                        .fillna({"Nouveau_client":0,"Transactions_Client":0}))
-    new_ret["Client_qui_reviennent"] = (new_ret["Clients"] - new_ret["Nouveau_client"]).clip(lower=0).astype(int)
-    new_ret["Recurrence"] = np.where(new_ret["Clients"]>0, new_ret["Transactions_Client"]/new_ret["Clients"], "")
-
-    cust_sets = ticket_client.groupby(["OrganisationID","month"])["CustomerID"].apply(lambda s: set(s.dropna().astype(str).unique())).reset_index(name="CustSet")
-    cust_sets["_order"] = pd.PeriodIndex(cust_sets["month"], freq="M").to_timestamp()
-    cust_sets = cust_sets.sort_values(["OrganisationID","_order"])
-    cust_sets["Prev"] = cust_sets.groupby("OrganisationID")["CustSet"].shift(1)
-    cust_sets["Retention_rate"] = cust_sets.apply(lambda r: len(r["Prev"].intersection(r["CustSet"])) / len(r["Prev"]) if isinstance(r["Prev"], set) and len(r["Prev"])>0 else "", axis=1)
-    ret = cust_sets[["month","OrganisationID","Retention_rate"]]
-    # 🔧 Harmonisation des colonnes avant merge KPI
-    for df in [base, new_ret, ret, coupons_used, coupons_emis]:
-        if "OrganisationID" not in df.columns:
-            # essaie de récupérer une version minuscule si présente
-            if "organisationid" in df.columns:
-                df["OrganisationID"] = df["organisationid"]
-            else:
-                df["OrganisationID"] = ""
-        df["OrganisationID"] = df["OrganisationID"].astype(str).fillna("")
-        if "month" not in df.columns:
-            df["month"] = ""
-        df["month"] = df["month"].astype(str).fillna("")
-
     # --- Merge KPI
-    kpi = (base.merge(new_ret, on=["month","OrganisationID"], how="left")
-                .merge(ret, on=["month","OrganisationID"], how="left")
-                .merge(coupons_used, on=["month","OrganisationID"], how="left")
+    kpi = (base.merge(coupons_used, on=["month","OrganisationID"], how="left")
                 .merge(coupons_emis, on=["month","OrganisationID"], how="left"))
 
     # --- Calculs finaux
     kpi["Marge_net_HT_apres_coupon"] = kpi["Marge_net_HT_avant_coupon"] - kpi["Montant_coupons_utilise"].fillna(0)
     kpi["Taux_de_marge_HT_avant_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_avant_coupon"]/kpi["CA_HT"], "")
     kpi["Taux_de_marge_HT_apres_coupons"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_apres_coupon"]/kpi["CA_HT"], "")
-    kpi["ROI_Proxy"] = np.where(kpi["Montant_coupons_utilise"].fillna(0)>0,
-                                (kpi["CA_paid_with_coupons"].fillna(0) - kpi["Montant_coupons_utilise"].fillna(0)) / kpi["Montant_coupons_utilise"].fillna(0), "")
     kpi["Taux_utilisation_bons_montant"] = np.where(kpi["Montant_coupons_emis"].fillna(0)>0,
                                                     kpi["Montant_coupons_utilise"].fillna(0)/kpi["Montant_coupons_emis"].fillna(0), "")
-    kpi["Taux_utilisation_bons_quantite"] = np.where(kpi["Coupon_emis"].fillna(0)>0,
-                                                     kpi["Coupon_utilise"].fillna(0)/kpi["Coupon_emis"].fillna(0), "")
-    kpi["Taux_CA_genere_par_bons_sur_CA_HT"] = np.where(kpi["CA_HT"]>0, kpi["CA_paid_with_coupons"]/kpi["CA_HT"], "")
-    kpi["Voucher_share"] = np.where(kpi["Transactions"]>0, kpi["Tickets_avec_coupon"]/kpi["Transactions"], "")
     kpi["Panier_moyen_HT"] = np.where(kpi["Transactions"]>0, kpi["CA_HT"]/kpi["Transactions"], "")
     kpi["Prix_moyen_article_vendu_HT"] = np.where(kpi["Qty_total"]>0, kpi["CA_HT"]/kpi["Qty_total"], "")
     kpi["Date"] = pd.to_datetime(kpi["month"], errors="coerce").dt.strftime("%d/%m/%Y")
 
-    # Nettoyage
-    num_cols = ["CA_TTC","CA_HT","CA_paid_with_coupons","Marge_net_HT_avant_coupon","Marge_net_HT_apres_coupon",
-                "Transactions","Transactions_Client","Clients","Coupon_utilise","Montant_coupons_utilise",
-                "Coupon_emis","Montant_coupons_emis","Panier_moyen_HT","Prix_moyen_article_vendu_HT","Qty_total"]
-    for c in num_cols:
-        if c in kpi.columns:
-            kpi[c] = pd.to_numeric(kpi[c], errors="coerce").fillna(0)
+    # Nettoyage final
     kpi = kpi.fillna("")
 
     st.subheader("📊 Aperçu KPI mensuel")
     st.dataframe(kpi.head(50))
 
-    # --- Export CSV
     csv = kpi.to_csv(index=False, sep=";").encode("utf-8-sig")
     st.download_button("💾 Télécharger le KPI mensuel (CSV)", csv, "KPI_mensuel.csv", "text/csv")
 
