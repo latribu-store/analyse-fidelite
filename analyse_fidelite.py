@@ -210,6 +210,22 @@ if file_tx and file_cp:
         Coupon_emis=("CouponID","nunique"),
         Montant_coupons_emis=("Amount_Initial","sum")
     ).rename(columns={"month_emit":"month"}).reset_index()
+    # --- Harmonisation des clés avant merge
+    for df in [base, coupons_used, coupons_emis]:
+        if "OrganisationID" not in df.columns:
+            if "organisationid" in df.columns:
+                df["OrganisationID"] = df["organisationid"]
+            else:
+                df["OrganisationID"] = ""
+        if "month" not in df.columns:
+            if "month_use" in df.columns:
+                df["month"] = df["month_use"]
+            elif "month_emit" in df.columns:
+                df["month"] = df["month_emit"]
+            else:
+                df["month"] = ""
+        df["OrganisationID"] = df["OrganisationID"].astype(str).fillna("")
+        df["month"] = df["month"].astype(str).fillna("")
 
     # --- Merge KPI
     kpi = (base.merge(coupons_used, on=["month","OrganisationID"], how="left")
