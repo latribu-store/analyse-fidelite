@@ -122,14 +122,31 @@ def init_duckdb():
 
 # --- Insertions robustes sans BinderException
 def upsert_transactions(con, fact_df):
-    """Ajoute dans DuckDB uniquement les nouvelles transactions."""
+    """Ajoute dans DuckDB uniquement les nouvelles transactions (avec typage sûr)."""
     if fact_df.empty:
         return
+
+    # Nettoyage / typage strict
+    df = fact_df.copy()
+    df["TransactionID"] = df["TransactionID"].astype(str)
+    df["OrganisationID"] = df["OrganisationID"].astype(str)
+    df["CustomerID"] = df["CustomerID"].astype(str)
+    df["month"] = df["month"].astype(str)
+    df["ValidationDate"] = pd.to_datetime(df["ValidationDate"], errors="coerce")
+    df["is_client"] = df["is_client"].astype(bool)
+    df["Has_Coupon"] = df["Has_Coupon"].astype(bool)
+    num_cols = ["CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket","CA_paid_with_coupons_HT","Estimated_Net_Margin_HT"]
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").astype(float)
+
+    # Vérifie les ID déjà existants
     existing_ids = set(con.execute("SELECT TransactionID FROM transactions").fetchdf()["TransactionID"])
-    new_fact = fact_df[~fact_df["TransactionID"].isin(existing_ids)]
+    new_fact = df[~df["TransactionID"].isin(existing_ids)]
     if new_fact.empty:
         return
+
     con.append("transactions", new_fact)
+
 
 def append_coupons(con, cp_df):
     if cp_df.empty:
