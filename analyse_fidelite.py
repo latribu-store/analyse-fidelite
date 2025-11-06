@@ -493,28 +493,27 @@ if file_tx and file_cp:
 
 
     def update_sheet(spreadsheet_id, sheet_name, df):
-        """Réécrit totalement la feuille KPI dans Google Sheets avec formatage FR homogène."""
+        """Met à jour la feuille Google Sheets sans la recréer (efface les lignes sous les en-têtes)."""
         try:
             sh = gspread_client.open_by_key(spreadsheet_id)
-
-            # 🔄 Supprime puis recrée la feuille (pour forcer l’actualisation)
             try:
                 ws = sh.worksheet(sheet_name)
-                sh.del_worksheet(ws)
             except gspread.WorksheetNotFound:
-                pass
+                # Si la feuille n'existe pas encore, on la crée
+                ws = sh.add_worksheet(title=sheet_name, rows=str(len(df) + 10), cols=str(len(df.columns) + 5))
 
-            ws = sh.add_worksheet(title=sheet_name, rows=str(len(df) + 10), cols=str(len(df.columns) + 5))
+            # 🧹 Efface uniquement les lignes existantes (pas les en-têtes)
+            last_row = len(ws.get_all_values())
+            if last_row > 1:
+                ws.batch_clear([f"A2:Z{last_row}"])  # garde la première ligne (les headers)
 
-            # 🧹 Prépare les données : décimales avec "," et dates propres
+            # 🧮 Formatage des valeurs avant upload
             df_upload = df.copy()
 
             def format_val(x):
-                # uniformise tous les nombres avec virgule
                 if pd.isna(x) or x == "":
                     return ""
                 try:
-                    # Si c’est un nombre (int, float ou str convertible)
                     x = float(x)
                     return str(round(x, 4)).replace(".", ",")
                 except Exception:
@@ -523,16 +522,18 @@ if file_tx and file_cp:
             for col in df_upload.columns:
                 df_upload[col] = df_upload[col].apply(format_val)
 
-            # 📤 Envoi vers Google Sheets
+            # 📤 Upload sans toucher aux en-têtes
             ws.update(
-                "A1",
-                [list(df_upload.columns)] + df_upload.values.tolist(),
+                "A2",
+                df_upload.astype(str).values.tolist(),
                 value_input_option="USER_ENTERED"
             )
 
-            st.success(f"✅ Feuille '{sheet_name}' mise à jour avec {len(df)} lignes (format FR homogène).")
+            st.success(f"✅ Feuille '{sheet_name}' mise à jour ({len(df)} lignes actualisées, en-têtes conservés).")
+
         except Exception as e:
             st.error(f"❌ Erreur mise à jour Google Sheets : {e}")
+
 
 
     # --- Exécution des exports
