@@ -488,7 +488,7 @@ if file_tx and file_cp:
 
 
     def update_sheet(spreadsheet_id, sheet_name, df):
-        """Réécrit totalement la feuille KPI dans Google Sheets avec formatage FR."""
+        """Réécrit totalement la feuille KPI dans Google Sheets avec formatage FR homogène."""
         try:
             sh = gspread_client.open_by_key(spreadsheet_id)
 
@@ -504,20 +504,28 @@ if file_tx and file_cp:
             # 🧹 Prépare les données : décimales avec "," et dates propres
             df_upload = df.copy()
 
-            for col in df_upload.select_dtypes(include=[float, int]).columns:
-                df_upload[col] = df_upload[col].apply(lambda x: "" if pd.isna(x) else str(x).replace(".", ","))
+            def format_val(x):
+                # uniformise tous les nombres avec virgule
+                if pd.isna(x) or x == "":
+                    return ""
+                try:
+                    # Si c’est un nombre (int, float ou str convertible)
+                    x = float(x)
+                    return str(round(x, 4)).replace(".", ",")
+                except Exception:
+                    return str(x).replace("'", "")
 
-            if "Date" in df_upload.columns:
-                df_upload["Date"] = df_upload["Date"].astype(str).str.replace("'", "")
+            for col in df_upload.columns:
+                df_upload[col] = df_upload[col].apply(format_val)
 
             # 📤 Envoi vers Google Sheets
             ws.update(
                 "A1",
-                [list(df_upload.columns)] + df_upload.astype(str).values.tolist(),
+                [list(df_upload.columns)] + df_upload.values.tolist(),
                 value_input_option="USER_ENTERED"
             )
 
-            st.success(f"✅ Feuille '{sheet_name}' mise à jour avec {len(df)} lignes.")
+            st.success(f"✅ Feuille '{sheet_name}' mise à jour avec {len(df)} lignes (format FR homogène).")
         except Exception as e:
             st.error(f"❌ Erreur mise à jour Google Sheets : {e}")
 
