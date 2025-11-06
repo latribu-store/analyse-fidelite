@@ -127,7 +127,7 @@ if file_tx and file_cp:
     ]].drop_duplicates("TransactionID")
 
     # =====================================================
-    # 2️⃣ UPSERT TRANSACTIONS (VERSION DÉFINITIVE)
+    # 2️⃣ UPSERT TRANSACTIONS (ANTI-CRASH)
     # =====================================================
     existing = con.execute("SELECT TransactionID FROM transactions").fetchdf()
     existing_ids = set(existing["TransactionID"]) if not existing.empty else set()
@@ -135,41 +135,27 @@ if file_tx and file_cp:
 
     if not new_tx.empty:
         schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall() if isinstance(r[0], str)]
-
-        # Ajoute les colonnes manquantes
         for col in schema_db:
             if col not in new_tx.columns:
                 new_tx[col] = np.nan
-
-        # Réordonne les colonnes
         new_tx = new_tx[[c for c in schema_db if c in new_tx.columns]]
 
-        # Nettoyage & typage SQL-friendly
         for col in new_tx.columns:
             cname = str(col).lower()
             if "date" in cname:
-                new_tx[col] = pd.to_datetime(new_tx[col], errors="coerce")
-                new_tx[col] = new_tx[col].fillna(pd.Timestamp("1970-01-01"))
+                new_tx[col] = pd.to_datetime(new_tx[col], errors="coerce").fillna(pd.Timestamp("1970-01-01"))
             elif any(x in cname for x in ["ca", "marge", "purch", "qty"]):
-                new_tx[col] = pd.to_numeric(new_tx[col], errors="coerce").fillna(0.0).astype(float)
+                new_tx[col] = pd.to_numeric(new_tx[col], errors="coerce").fillna(0.0)
             else:
                 new_tx[col] = new_tx[col].astype(str).fillna("")
 
-        new_tx = new_tx.astype({
-            "TransactionID": "string",
-            "OrganisationID": "string",
-            "CustomerID": "string",
-            "month": "string"
-        }, errors="ignore")
-
-        # ✅ Append stable
         con.execute("INSERT INTO transactions SELECT * FROM new_tx", {'new_tx': new_tx})
-        st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées à l’historique.")
+        st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées.")
     else:
         st.info("ℹ️ Aucune nouvelle transaction à insérer.")
 
     # =====================================================
-    # 3️⃣ UPSERT COUPONS (MÊME LOGIQUE)
+    # 3️⃣ UPSERT COUPONS (ANTI-CRASH)
     # =====================================================
     cc_id   = pick_col(cp, "couponid")
     cc_org  = pick_col(cp, "organisationid", "organizationid")
@@ -207,7 +193,7 @@ if file_tx and file_cp:
                 if "date" in cname:
                     new_cp[col] = pd.to_datetime(new_cp[col], errors="coerce").fillna(pd.Timestamp("1970-01-01"))
                 elif any(x in cname for x in ["amount", "value"]):
-                    new_cp[col] = pd.to_numeric(new_cp[col], errors="coerce").fillna(0.0).astype(float)
+                    new_cp[col] = pd.to_numeric(new_cp[col], errors="coerce").fillna(0.0)
                 else:
                     new_cp[col] = new_cp[col].astype(str).fillna("")
 
