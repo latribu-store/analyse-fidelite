@@ -15,10 +15,10 @@ DUCKDB_PATH = "historique.duckdb"
 # ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
-def _ensure_date(s): 
+def _ensure_date(s):
     return pd.to_datetime(s, errors="coerce")
 
-def _month_str(s): 
+def _month_str(s):
     return _ensure_date(s).dt.to_period("M").astype(str)
 
 def read_csv(uploaded):
@@ -127,14 +127,13 @@ if file_tx and file_cp:
     ]].drop_duplicates("TransactionID")
 
     # =====================================================
-    # 2️⃣ UPSERT TRANSACTIONS (VERSION ULTRA ROBUSTE)
+    # 2️⃣ UPSERT TRANSACTIONS (VERSION DÉFINITIVE)
     # =====================================================
     existing = con.execute("SELECT TransactionID FROM transactions").fetchdf()
     existing_ids = set(existing["TransactionID"]) if not existing.empty else set()
     new_tx = fact[~fact["TransactionID"].isin(existing_ids)]
 
     if not new_tx.empty:
-        # Récupère le schéma exact (noms de colonnes valides uniquement)
         schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall() if isinstance(r[0], str)]
 
         # Ajoute les colonnes manquantes
@@ -142,29 +141,35 @@ if file_tx and file_cp:
             if col not in new_tx.columns:
                 new_tx[col] = np.nan
 
-        # Réordonne et garde uniquement les colonnes connues
+        # Réordonne les colonnes
         new_tx = new_tx[[c for c in schema_db if c in new_tx.columns]]
 
-        # Typage intelligent et sécurisé
+        # Nettoyage & typage SQL-friendly
         for col in new_tx.columns:
             cname = str(col).lower()
             if "date" in cname:
                 new_tx[col] = pd.to_datetime(new_tx[col], errors="coerce")
+                new_tx[col] = new_tx[col].fillna(pd.Timestamp("1970-01-01"))
             elif any(x in cname for x in ["ca", "marge", "purch", "qty"]):
-                new_tx[col] = pd.to_numeric(new_tx[col], errors="coerce")
+                new_tx[col] = pd.to_numeric(new_tx[col], errors="coerce").fillna(0.0).astype(float)
             else:
-                new_tx[col] = new_tx[col].astype(str)
+                new_tx[col] = new_tx[col].astype(str).fillna("")
 
-        # Append dans DuckDB
-        con.append("transactions", new_tx)
+        new_tx = new_tx.astype({
+            "TransactionID": "string",
+            "OrganisationID": "string",
+            "CustomerID": "string",
+            "month": "string"
+        }, errors="ignore")
+
+        # ✅ Append stable
+        con.execute("INSERT INTO transactions SELECT * FROM new_tx", {'new_tx': new_tx})
         st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées à l’historique.")
     else:
         st.info("ℹ️ Aucune nouvelle transaction à insérer.")
 
-
-
     # =====================================================
-    # 3️⃣ UPSERT COUPONS (ROBUSTE)
+    # 3️⃣ UPSERT COUPONS (MÊME LOGIQUE)
     # =====================================================
     cc_id   = pick_col(cp, "couponid")
     cc_org  = pick_col(cp, "organisationid", "organizationid")
@@ -191,28 +196,27 @@ if file_tx and file_cp:
         new_cp = cp_norm[~cp_norm["CouponID"].isin(existing_cp_ids)]
 
         if not new_cp.empty:
-            schema_cp = [r[0] for r in con.execute("PRAGMA table_info('coupons')").fetchall()]
+            schema_cp = [r[0] for r in con.execute("PRAGMA table_info('coupons')").fetchall() if isinstance(r[0], str)]
             for col in schema_cp:
                 if col not in new_cp.columns:
                     new_cp[col] = np.nan
-            new_cp = new_cp[schema_cp]
-            new_cp = new_cp.astype({
-                "CouponID": "string",
-                "OrganisationID": "string",
-                "UseDate": "datetime64[ns]",
-                "EmissionDate": "datetime64[ns]",
-                "month_use": "string",
-                "month_emit": "string",
-                "Amount_Initial": "float64",
-                "Amount_Remaining": "float64",
-                "Value_Used_Line": "float64"
-            }, errors="ignore")
-            con.append("coupons", new_cp)
+            new_cp = new_cp[[c for c in schema_cp if c in new_cp.columns]]
+
+            for col in new_cp.columns:
+                cname = str(col).lower()
+                if "date" in cname:
+                    new_cp[col] = pd.to_datetime(new_cp[col], errors="coerce").fillna(pd.Timestamp("1970-01-01"))
+                elif any(x in cname for x in ["amount", "value"]):
+                    new_cp[col] = pd.to_numeric(new_cp[col], errors="coerce").fillna(0.0).astype(float)
+                else:
+                    new_cp[col] = new_cp[col].astype(str).fillna("")
+
+            con.execute("INSERT INTO coupons SELECT * FROM new_cp", {'new_cp': new_cp})
             st.success(f"✅ {len(new_cp)} nouveaux coupons ajoutés.")
         else:
             st.info("ℹ️ Aucun nouveau coupon à insérer.")
     else:
-        st.warning("⚠️ Fichier coupons incomplet (CouponID/OrganisationID manquants) — KPI partiel sans bons.")
+        st.warning("⚠️ Fichier coupons incomplet (CouponID/OrganisationID manquants).")
 
     # =====================================================
     # 4️⃣ KPI MENSUELS
