@@ -154,7 +154,7 @@ if file_tx and file_cp:
     st.success(f"✅ {len(new_tx)} nouvelles transactions et {len(new_cp)} nouveaux coupons ajoutés à l’historique local.")
 
     # ======================================================
-    # 6️⃣ KPI Mensuel
+    # 6️⃣ KPI Mensuel — COMPLET (toutes colonnes demandées)
     # ======================================================
     df_tx = hist_tx.copy()
     df_cp = hist_cp.copy()
@@ -163,7 +163,7 @@ if file_tx and file_cp:
         st.warning("⚠️ Pas de données transactionnelles disponibles.")
         st.stop()
 
-    # Nettoyage
+    # --- Nettoyage transactions
     df_tx["ValidationDate"] = _ensure_date(df_tx["ValidationDate"])
     df_tx["month"] = _month_str(df_tx["ValidationDate"])
     for col in ["CA_TTC","CA_HT","Purch_Total_HT","Qty_Ticket"]:
@@ -173,10 +173,10 @@ if file_tx and file_cp:
     df_tx["OrganisationID"] = df_tx["OrganisationID"].fillna("").astype(str)
     df_tx["_is_coupon_line"] = df_tx["Label"].str.upper().eq("COUPON")
 
-    # Agrégation ticket
+    # --- Fact ticket (1 ligne = 1 ticket)
     agg_ticket = df_tx.groupby("TransactionID", dropna=False).agg(
-        CA_TTC_ticket=("CA_TTC", "max"),
-        CA_HT_ticket=("CA_HT", "sum"),
+        CA_TTC_ticket=("CA_TTC", "max"),          # TTC répété → prendre max
+        CA_HT_ticket=("CA_HT", "sum"),            # HT se somme par lignes
         Cost_ticket=("Purch_Total_HT", "sum"),
         Qty_ticket=("Qty_Ticket", "sum"),
         Has_Coupon=("_is_coupon_line", "max"),
@@ -189,7 +189,13 @@ if file_tx and file_cp:
     agg_ticket["Marge_net_HT_ticket"] = agg_ticket["CA_HT_ticket"] - agg_ticket["Cost_ticket"]
     agg_ticket["CA_paid_with_coupons"] = np.where(agg_ticket["Has_Coupon"], agg_ticket["CA_TTC_ticket"], 0.0)
 
-    # Base mensuelle
+    # --- Splits utiles
+    ticket_client      = agg_ticket[agg_ticket["CustomerID"].str.len() > 0].copy()
+    ticket_non_client  = agg_ticket[agg_ticket["CustomerID"].str.len() == 0].copy()
+    ticket_coupon      = agg_ticket[agg_ticket["Has_Coupon"]].copy()
+    ticket_sans_coupon = agg_ticket[~agg_ticket["Has_Coupon"]].copy()
+
+    # --- Base mensuelle (par magasin)
     base = agg_ticket.groupby(["month","OrganisationID"], dropna=False).agg(
         CA_TTC=("CA_TTC_ticket","sum"),
         CA_HT=("CA_HT_ticket","sum"),
@@ -200,55 +206,173 @@ if file_tx and file_cp:
         Tickets_avec_coupon=("Has_Coupon","sum")
     ).reset_index()
 
-    # Coupons utilisés / émis
+    # --- Clients / Transactions côté clients
+    cli_base = ticket_client.groupby(["month","OrganisationID"], dropna=False).agg(
+        Transactions_Client=("TransactionID","nunique"),
+        Clients=("CustomerID","nunique")
+    ).reset_index()
+    assoc = base.merge(cli_base, on=["month","OrganisationID"], how="left").fillna({"Transactions_Client":0, "Clients":0})
+    assoc["Taux_association_client"] = np.where(
+        assoc["Transactions"]>0, assoc["Transactions_Client"]/assoc["Transactions"], np.nan
+    )
+
+    # --- Nouveaux / Récurrents
+    first_seen = ticket_client.groupby(["OrganisationID","CustomerID"], dropna=False)["ValidationDate"].min().reset_index(name="FirstDate")
+    ticket_client = ticket_client.merge(first_seen, on=["OrganisationID","CustomerID"], how="left")
+    ticket_client["IsNewThisMonth"] = ticket_client["ValidationDate"].dt.to_period("M") == ticket_client["FirstDate"].dt.to_period("M")
+
+    new_ret = ticket_client.groupby(["month","OrganisationID"], dropna=False).agg(
+        Nouveau_client=("IsNewThisMonth", "sum"),
+        Clients_mois=("CustomerID","nunique"),
+        Transactions_Client=("TransactionID","nunique")
+    ).reset_index()
+    new_ret["Client_qui_reviennent"] = (new_ret["Clients_mois"] - new_ret["Nouveau_client"]).clip(lower=0).astype(int)
+    new_ret["Recurrence"] = np.where(new_ret["Clients_mois"]>0,
+                                    new_ret["Transactions_Client"]/new_ret["Clients_mois"], np.nan)
+    new_ret = new_ret.rename(columns={"Clients_mois":"Clients"})
+
+    # --- Rétention (clients N-1 vus en N)
+    cust_sets = (
+        ticket_client.groupby(["OrganisationID","month"], dropna=False)["CustomerID"]
+        .apply(lambda s: set(s.dropna().astype(str).unique()))
+        .reset_index(name="CustSet")
+    )
+    cust_sets["_order"] = pd.PeriodIndex(cust_sets["month"], freq="M").to_timestamp()
+    cust_sets = cust_sets.sort_values(["OrganisationID","_order"])
+    cust_sets["Prev"] = cust_sets.groupby("OrganisationID")["CustSet"].shift(1)
+    ret = cust_sets[["month","OrganisationID"]].copy()
+    ret["Retention_rate"] = cust_sets.apply(
+        lambda r: (len(r["Prev"].intersection(r["CustSet"])) / len(r["Prev"])) if isinstance(r["Prev"], set) and len(r["Prev"])>0 else np.nan,
+        axis=1
+    )
+
+    # --- Coupons (émis / utilisés) déjà mappés plus haut → agrégations
     coupons_used = df_cp.dropna(subset=["UseDate"]).groupby(["month_use","OrganisationID"]).agg(
         Coupon_utilise=("CouponID","nunique"),
         Montant_coupons_utilise=("Value_Used_Line","sum")
     ).rename(columns={"month_use":"month"}).reset_index()
-
     coupons_emis = df_cp.dropna(subset=["EmissionDate"]).groupby(["month_emit","OrganisationID"]).agg(
         Coupon_emis=("CouponID","nunique"),
         Montant_coupons_emis=("Amount_Initial","sum")
     ).rename(columns={"month_emit":"month"}).reset_index()
-    # --- Harmonisation des clés avant merge
-    for df in [base, coupons_used, coupons_emis]:
-        if "OrganisationID" not in df.columns:
-            if "organisationid" in df.columns:
-                df["OrganisationID"] = df["organisationid"]
-            else:
-                df["OrganisationID"] = ""
-        if "month" not in df.columns:
-            if "month_use" in df.columns:
-                df["month"] = df["month_use"]
-            elif "month_emit" in df.columns:
-                df["month"] = df["month_emit"]
-            else:
-                df["month"] = ""
-        df["OrganisationID"] = df["OrganisationID"].astype(str).fillna("")
-        df["month"] = df["month"].astype(str).fillna("")
 
-    # --- Merge KPI
-    kpi = (base.merge(coupons_used, on=["month","OrganisationID"], how="left")
-                .merge(coupons_emis, on=["month","OrganisationID"], how="left"))
+    # --- Paniers moyens
+    panier_client     = ticket_client.groupby(["month","OrganisationID"], dropna=False)["CA_HT_ticket"].mean().reset_index(name="Panier_moyen_client")
+    panier_non_client = ticket_non_client.groupby(["month","OrganisationID"], dropna=False)["CA_HT_ticket"].mean().reset_index(name="Panier_moyen_non_client")
+    panier_avec       = ticket_coupon.groupby(["month","OrganisationID"], dropna=False)["CA_HT_ticket"].mean().reset_index(name="Panier_moyen_avec_coupon")
+    panier_sans       = ticket_sans_coupon.groupby(["month","OrganisationID"], dropna=False)["CA_HT_ticket"].mean().reset_index(name="Panier_moyen_sans_coupon")
 
-    # --- Calculs finaux
+    # --- Harmonisation clés avant merges
+    for df_ in [base, assoc, new_ret, ret, coupons_used, coupons_emis, panier_client, panier_non_client, panier_avec, panier_sans]:
+        if "OrganisationID" not in df_.columns and "organisationid" in df_.columns:
+            df_["OrganisationID"] = df_["organisationid"]
+        if "month" not in df_.columns:
+            df_["month"] = df_.get("month", "")
+        df_["OrganisationID"] = df_["OrganisationID"].astype(str).fillna("")
+        df_["month"] = df_["month"].astype(str).fillna("")
+
+    # --- KPI fusionné
+    kpi = (base
+        .merge(assoc[["month","OrganisationID","Transactions_Client","Clients","Taux_association_client"]],
+                on=["month","OrganisationID"], how="left")
+        .merge(new_ret[["month","OrganisationID","Nouveau_client","Client_qui_reviennent","Recurrence"]],
+                on=["month","OrganisationID"], how="left")
+        .merge(ret, on=["month","OrganisationID"], how="left")
+        .merge(coupons_used, on=["month","OrganisationID"], how="left")
+        .merge(coupons_emis, on=["month","OrganisationID"], how="left")
+        .merge(panier_client, on=["month","OrganisationID"], how="left")
+        .merge(panier_non_client, on=["month","OrganisationID"], how="left")
+        .merge(panier_avec, on=["month","OrganisationID"], how="left")
+        .merge(panier_sans, on=["month","OrganisationID"], how="left")
+        )
+
+    # --- Dérivés finaux
     kpi["Marge_net_HT_apres_coupon"] = kpi["Marge_net_HT_avant_coupon"] - kpi["Montant_coupons_utilise"].fillna(0)
-    kpi["Taux_de_marge_HT_avant_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_avant_coupon"]/kpi["CA_HT"], "")
-    kpi["Taux_de_marge_HT_apres_coupons"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_apres_coupon"]/kpi["CA_HT"], "")
+    kpi["Taux_de_marge_HT_avant_coupon"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_avant_coupon"]/kpi["CA_HT"], np.nan)
+    kpi["Taux_de_marge_HT_apres_coupons"] = np.where(kpi["CA_HT"]>0, kpi["Marge_net_HT_apres_coupon"]/kpi["CA_HT"], np.nan)
+    kpi["ROI_Proxy"] = np.where(kpi["Montant_coupons_utilise"].fillna(0)>0,
+                                (kpi["CA_paid_with_coupons"].fillna(0) - kpi["Montant_coupons_utilise"].fillna(0)) / kpi["Montant_coupons_utilise"].fillna(0),
+                                np.nan)
+    kpi["Panier_moyen_HT"] = np.where(kpi["Transactions"]>0, kpi["CA_HT"]/kpi["Transactions"], np.nan)
+    kpi["Prix_moyen_article_vendu_HT"] = np.where(kpi["Qty_total"]>0, kpi["CA_HT"]/kpi["Qty_total"], np.nan)
+    kpi["Quantite_moy_article_par_transaction"] = np.where(kpi["Transactions"]>0, kpi["Qty_total"]/kpi["Transactions"], np.nan)
     kpi["Taux_utilisation_bons_montant"] = np.where(kpi["Montant_coupons_emis"].fillna(0)>0,
-                                                    kpi["Montant_coupons_utilise"].fillna(0)/kpi["Montant_coupons_emis"].fillna(0), "")
-    kpi["Panier_moyen_HT"] = np.where(kpi["Transactions"]>0, kpi["CA_HT"]/kpi["Transactions"], "")
-    kpi["Prix_moyen_article_vendu_HT"] = np.where(kpi["Qty_total"]>0, kpi["CA_HT"]/kpi["Qty_total"], "")
+                                                    kpi["Montant_coupons_utilise"].fillna(0)/kpi["Montant_coupons_emis"].fillna(0), np.nan)
+    kpi["Taux_utilisation_bons_quantite"] = np.where(kpi["Coupon_emis"].fillna(0)>0,
+                                                    kpi["Coupon_utilise"].fillna(0)/kpi["Coupon_emis"].fillna(0), np.nan)
+    kpi["Taux_CA_genere_par_bons_sur_CA_HT"] = np.where(kpi["CA_HT"]>0, kpi["CA_paid_with_coupons"]/kpi["CA_HT"], np.nan)
+    kpi["Voucher_share"] = np.where(kpi["Transactions"]>0, kpi["Tickets_avec_coupon"]/kpi["Transactions"], np.nan)
     kpi["Date"] = pd.to_datetime(kpi["month"], errors="coerce").dt.strftime("%d/%m/%Y")
 
-    # Nettoyage final
+    # --- Renommage final (titres FR) & ordre exact
+    rename_fr = {
+        "month":"month",
+        "Date":"Date",
+        "OrganisationID":"OrganisationID",
+        "CA_TTC":"CA TTC",
+        "CA_HT":"CA HT",
+        "CA_paid_with_coupons":"CA paid with coupons",
+        "Marge_net_HT_avant_coupon":"Marge net HT avant coupon",
+        "Marge_net_HT_apres_coupon":"Marge net HT après coupon",
+        "Taux_de_marge_HT_avant_coupon":"Taux de marge HT avant coupon",
+        "Taux_de_marge_HT_apres_coupons":"Taux de marge HT après coupons",
+        "Transactions":"Transaction",
+        "Transactions_Client":"Transaction associé à un client (nombre)",
+        "Clients":"Client",
+        "Nouveau_client":"Nouveau client",
+        "Client_qui_reviennent":"Client qui reviennent",
+        "Recurrence":"Recurrence",
+        "Retention_rate":"Retention_rate",
+        "Taux_association_client":"Taux association client",
+        "Coupon_utilise":"Coupon utilisé",
+        "Montant_coupons_utilise":"Montant coupons utilisé",
+        "Coupon_emis":"Coupon émis",
+        "Montant_coupons_emis":"Montant coupons émis",
+        "Taux_utilisation_bons_montant":"Taux d'utilisation des bons en montant",
+        "Taux_utilisation_bons_quantite":"Taux d'utilisation des bons en quantité",
+        "Taux_CA_genere_par_bons_sur_CA_HT":"Taux de CA généré par les bons sur CA HT",
+        "Voucher_share":"Voucher_share",
+        "Panier_moyen_HT":"Panier moyen HT",
+        "Panier_moyen_client":"Panier moyen client",
+        "Panier_moyen_non_client":"Panier moyen non client",
+        "Panier_moyen_sans_coupon":"Panier moyen sans coupon",
+        "Panier_moyen_avec_coupon":"Panier moyen avec coupon",
+        "Prix_moyen_article_vendu_HT":"Prix moyen article vendu HT",
+        "Quantite_moy_article_par_transaction":"Quantité moyen article par transaction",
+        "Qty_total":"Quantité total article (somme)"
+    }
+    kpi = kpi.rename(columns=rename_fr)
+
+    order_cols = [
+        "month","Date","OrganisationID",
+        "CA TTC","CA HT","CA paid with coupons",
+        "Marge net HT avant coupon","Marge net HT après coupon",
+        "Taux de marge HT avant coupon","Taux de marge HT après coupons",
+        "Transaction","Transaction associé à un client (nombre)","Taux association client",
+        "Client","Nouveau client","Client qui reviennent","Recurrence","Retention_rate",
+        "Coupon utilisé","Montant coupons utilisé","Coupon émis","Montant coupons émis",
+        "Taux d'utilisation des bons en montant","Taux d'utilisation des bons en quantité",
+        "Taux de CA généré par les bons sur CA HT","Voucher_share",
+        "Panier moyen HT","Panier moyen client","Panier moyen non client",
+        "Panier moyen sans coupon","Panier moyen avec coupon",
+        "Prix moyen article vendu HT","Quantité moyen article par transaction","Quantité total article (somme)"
+    ]
+    for c in order_cols:
+        if c not in kpi.columns:
+            kpi[c] = np.nan
+    kpi = kpi[order_cols]
+
+    # --- Nettoyage sorties (NaN → "")
+    kpi = kpi.replace([np.inf, -np.inf], np.nan)
     kpi = kpi.fillna("")
 
-    st.subheader("📊 Aperçu KPI mensuel")
+    st.subheader("📊 KPI mensuels (complet)")
     st.dataframe(kpi.head(50))
 
+    # --- Export CSV
     csv = kpi.to_csv(index=False, sep=";").encode("utf-8-sig")
     st.download_button("💾 Télécharger le KPI mensuel (CSV)", csv, "KPI_mensuel.csv", "text/csv")
+
 
 else:
     st.info("➡️ Importez les fichiers Transactions et Coupons pour démarrer.")
