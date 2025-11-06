@@ -220,16 +220,17 @@ def init_duckdb():
     return con
 
 def upsert_transactions(con, fact_df):
-    # Insert uniquement les nouvelles TransactionID
-    con.execute("CREATE TEMP TABLE tmp_new AS SELECT * FROM fact_df")
+    # Register du DataFrame
+    con.register("new_fact", fact_df)
+    # Insère uniquement les nouvelles transactions (TransactionID non encore présentes)
     con.execute("""
         INSERT INTO transactions
-        SELECT * FROM tmp_new n
-        WHERE NOT EXISTS (
-            SELECT 1 FROM transactions t WHERE t.TransactionID = n.TransactionID
+        SELECT * FROM new_fact n
+        WHERE n.TransactionID NOT IN (
+            SELECT TransactionID FROM transactions
         )
     """)
-    con.execute("DROP TABLE tmp_new")
+    con.unregister("new_fact")
 
 def append_coupons(con, cp_df):
     # On peut faire un append "naïf" + dédup si besoin
