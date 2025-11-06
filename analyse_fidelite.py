@@ -392,31 +392,52 @@ if file_tx and file_cp:
     csv = kpi.to_csv(index=False, sep=";").encode("utf-8-sig")
     st.download_button("💾 Télécharger le KPI mensuel (CSV)", csv, "KPI_mensuel.csv", "text/csv")
 
-    # ============================================================
-    # 7️⃣ EXPORTS GOOGLE DRIVE & GOOGLE SHEET (AJOUT UNIQUEMENT)
+        # ============================================================
+    # 7️⃣ EXPORTS GOOGLE DRIVE & GOOGLE SHEET
     # ============================================================
     st.subheader("☁️ Export Google Drive & Google Sheets")
 
     # --- Export vers Google Drive : transactions.parquet et coupons.parquet
     def upload_to_drive(file_path, file_name, mime_type="application/octet-stream", folder_id=None):
+        """Upload un fichier dans le dossier Google Drive partagé configuré."""
+        if folder_id is None:
+            # Récupère le dossier Drive depuis les secrets Streamlit
+            folder_id = st.secrets["gcp"].get("folder_id", "")
+
         file_metadata = {"name": file_name}
         if folder_id:
             file_metadata["parents"] = [folder_id]
+
         media = MediaIoBaseUpload(open(file_path, "rb"), mimetype=mime_type, resumable=True)
+
+        # Recherche si un fichier du même nom existe déjà dans le dossier
+        query = f"name='{file_name}' and trashed=false"
+        if folder_id:
+            query += f" and '{folder_id}' in parents"
+
         existing = (
             drive_service.files()
-            .list(q=f"name='{file_name}' and trashed=false", fields="files(id)")
+            .list(q=query, fields="files(id)")
             .execute()
             .get("files", [])
         )
-        if existing:
-            file_id = existing[0]["id"]
-            drive_service.files().update(fileId=file_id, media_body=media).execute()
-            return file_id
-        else:
-            f = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-            return f.get("id")
 
+        try:
+            if existing:
+                # Mise à jour du fichier existant
+                file_id = existing[0]["id"]
+                drive_service.files().update(fileId=file_id, media_body=media).execute()
+            else:
+                # Création d’un nouveau fichier dans le dossier partagé
+                drive_service.files().create(
+                    body=file_metadata, media_body=media, fields="id"
+                ).execute()
+            st.success(f"✅ Fichier '{file_name}' exporté sur Google Drive.")
+        except Exception as e:
+            st.error(f"❌ Erreur lors de l'upload du fichier '{file_name}' : {e}")
+
+
+    # --- Exécution des exports Drive
     try:
         _ = upload_to_drive(TX_PATH, "transactions.parquet", "application/octet-stream")
         _ = upload_to_drive(CP_PATH, "coupons.parquet", "application/octet-stream")
@@ -424,21 +445,27 @@ if file_tx and file_cp:
     except Exception as e:
         st.error(f"❌ Erreur export Drive : {e}")
 
+
     # --- Export vers Google Sheets (KPI)
     def update_sheet(spreadsheet_id, sheet_name, df):
+        """Met à jour ou crée une feuille dans le Google Sheet cible."""
         try:
             sh = gspread_client.open_by_key(spreadsheet_id)
             try:
                 ws = sh.worksheet(sheet_name)
             except gspread.WorksheetNotFound:
                 ws = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
+
             ws.clear()
             ws.update("A1", [list(df.columns)] + df.astype(str).values.tolist())
             st.success(f"✅ Feuille '{sheet_name}' mise à jour avec {len(df)} lignes.")
         except Exception as e:
             st.error(f"❌ Erreur mise à jour Google Sheets : {e}")
 
+
+    # --- Mise à jour de la feuille KPI
     update_sheet(SPREADSHEET_ID, "KPI_Mensuels", kpi)
+
 
 else:
     st.info("➡️ Importez les fichiers Transactions et Coupons pour démarrer.")
