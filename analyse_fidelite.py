@@ -86,21 +86,31 @@ if file_tx and file_cp:
     hist_cp = load_parquet(CP_PATH, CP_COLS)
 
     # 3️⃣ Mapping automatique Keyneo
+    def safe_pick(df, *cands):
+        for c in cands:
+            c_clean = c.lower()
+            if c_clean in df.columns:
+                return c_clean
+        return None
+
     map_tx = {
-        "TransactionID": pick(tx, "ticketnumber", "transactionid", "operationid"),
-        "ValidationDate": pick(tx, "validationdate", "operationdate"),
-        "OrganisationID": pick(tx, "organisationid", "organizationid"),
-        "CustomerID": pick(tx, "customerid", "clientid"),
-        "ProductID": pick(tx, "productid", "sku", "ean"),
-        "Label": pick(tx, "label", "designation"),
-        "CA_TTC": pick(tx, "totalamount", "totalttc", "totaltcc"),
-        "CA_HT": pick(tx, "linegrossamount", "montanthtligne", "cahtligne"),
-        "Purch_Total_HT": pick(tx, "linetotalpurchasingamount", "purchasingamount", "costprice"),
-        "Qty_Ticket": pick(tx, "quantity", "qty", "linequantity")
+        "TransactionID": safe_pick(tx, "ticketnumber", "transactionid", "operationid"),
+        "ValidationDate": safe_pick(tx, "validationdate", "operationdate"),
+        "OrganisationID": safe_pick(tx, "organisationid", "organizationid"),
+        "CustomerID": safe_pick(tx, "customerid", "clientid"),
+        "ProductID": safe_pick(tx, "productid", "sku", "ean"),
+        "Label": safe_pick(tx, "label", "designation"),
+        "CA_TTC": safe_pick(tx, "totalamount", "totalttc", "totaltcc"),
+        "CA_HT": safe_pick(tx, "linegrossamount", "montanthtligne", "cahtligne"),
+        "Purch_Total_HT": safe_pick(tx, "linetotalpurchasingamount", "purchasingamount", "costprice"),
+        "Qty_Ticket": safe_pick(tx, "quantity", "qty", "linequantity")
     }
 
-    for k,v in map_tx.items():
-        tx[k] = tx[v] if v in tx.columns else ""
+    # 🪄 Debug visuel dans l'app
+    st.write("🧩 Colonnes détectées (transactions):", map_tx)
+
+    for k, v in map_tx.items():
+        tx[k] = tx[v] if v and v in tx.columns else ""
 
     # Conversion types
     tx["ValidationDate"] = _ensure_date(tx["ValidationDate"])
@@ -112,24 +122,19 @@ if file_tx and file_cp:
 
     # 4️⃣ Mapping automatique Coupons
     map_cp = {
-        "CouponID": pick(cp, "couponid", "id"),
-        "OrganisationID": pick(cp, "organisationid", "organizationid"),
-        "EmissionDate": pick(cp, "creationdate", "issuedate"),
-        "UseDate": pick(cp, "usedate", "validationdate"),
-        "Amount_Initial": pick(cp, "initialvalue", "amount", "value"),
-        "Amount_Remaining": pick(cp, "amountremaining", "restant", "reste"),
+        "CouponID": safe_pick(cp, "couponid", "id"),
+        "OrganisationID": safe_pick(cp, "organisationid", "organizationid"),
+        "EmissionDate": safe_pick(cp, "creationdate", "issuedate"),
+        "UseDate": safe_pick(cp, "usedate", "validationdate"),
+        "Amount_Initial": safe_pick(cp, "initialvalue", "amount", "value"),
+        "Amount_Remaining": safe_pick(cp, "amountremaining", "restant", "reste"),
     }
 
-    for k,v in map_cp.items():
-        cp[k] = cp[v] if v in cp.columns else ""
+    st.write("🧾 Colonnes détectées (coupons):", map_cp)
 
-    cp["EmissionDate"] = _ensure_date(cp["EmissionDate"])
-    cp["UseDate"] = _ensure_date(cp["UseDate"])
-    cp["Amount_Initial"] = pd.to_numeric(cp["Amount_Initial"], errors="coerce").fillna(0.0)
-    cp["Amount_Remaining"] = pd.to_numeric(cp["Amount_Remaining"], errors="coerce").fillna(0.0)
-    cp["Value_Used_Line"] = (cp["Amount_Initial"] - cp["Amount_Remaining"]).clip(lower=0.0)
-    cp["month_use"] = _month_str(cp["UseDate"])
-    cp["month_emit"] = _month_str(cp["EmissionDate"])
+    for k, v in map_cp.items():
+        cp[k] = cp[v] if v and v in cp.columns else ""
+
 
     # 5️⃣ Append-only sans doublons
     tx["TransactionID"] = tx["TransactionID"].astype(str)
