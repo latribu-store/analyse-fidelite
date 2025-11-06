@@ -181,56 +181,74 @@ if file_tx and file_cp:
     # [on garde ton bloc KPI complet ici]
     # 👆👆👆
 
-    # ======================================================
-    # 🚀 EXPORT GOOGLE DRIVE + SHEETS + MAIL
-    # ======================================================
-    csv_path = os.path.join(DATA_DIR, "KPI_mensuel.csv")
-    kpi.to_csv(csv_path, index=False, sep=";", encoding="utf-8-sig")
+    # ============================================================
+    # EXPORTS LOCAUX / DRIVE / SHEETS
+    # ============================================================
 
-    def upload_to_drive(file_path, name, mime="text/csv"):
-        file_metadata = {"name": name}
-        media = MediaIoBaseUpload(io.FileIO(file_path, "rb"), mimetype=mime)
-        drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    # Création du dossier de données s’il n’existe pas
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-    upload_to_drive(csv_path, "KPI_mensuel.csv")
-    upload_to_drive(TX_PATH, "transactions.parquet", "application/octet-stream")
-    upload_to_drive(CP_PATH, "coupons.parquet", "application/octet-stream")
-
-    sh = gspread_client.open_by_key(SPREADSHEET_ID)
+    # ✅ Le bon DataFrame des KPI mensuels s'appelle bien "df_kpi_mensuels" (ou merged_kpi selon ta version)
     try:
-        ws = sh.worksheet("KPI_Mensuels")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet("KPI_Mensuels", rows="1000", cols="40")
-    ws.clear()
-    ws.update([list(kpi.columns)] + kpi.values.tolist(), value_input_option="USER_ENTERED")
+        kpi = df_kpi_mensuels.copy()
+    except NameError:
+        try:
+            kpi = merged_kpi.copy()
+        except NameError:
+            st.error("❌ Aucune variable KPI trouvée — vérifie que la table KPI mensuelle a bien été générée.")
+            st.stop()
 
-    st.success("✅ Données exportées vers Google Sheets et Google Drive.")
+    # Export CSV local
+    csv_path = os.path.join(DATA_DIR, "KPI_Mensuel.csv")
+    kpi.to_csv(csv_path, index=False, sep=";", encoding="utf-8-sig")
+    st.success(f"✅ Export CSV local terminé : {csv_path}")
 
-    # --- Envoi du mail
-    msg = EmailMessage()
-    msg["Subject"] = "📈 Rapport KPI Mensuel - La Tribu"
-    msg["From"] = SMTP_USER
-    msg["To"] = DEFAULT_RECEIVER
-    msg.set_content(
-        f"""Bonjour 👋,
+    # ============================================================
+    # EXPORT GOOGLE DRIVE
+    # ============================================================
+    try:
+        credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+        drive_service = build("drive", "v3", credentials=credentials)
 
-Le rapport KPI mensuel actualisé est disponible en pièce jointe.
+        file_metadata = {"name": "KPI_Mensuel.csv", "mimeType": "text/csv"}
+        media = MediaIoBaseUpload(io.FileIO(csv_path, "rb"), mimetype="text/csv", resumable=True)
+        drive_file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        st.success(f"📁 Fichier uploadé sur Google Drive : ID {drive_file.get('id')}")
+    except Exception as e:
+        st.warning(f"⚠️ Échec upload Drive : {e}")
 
-🔗 Lien Looker Studio : {LOOKER_URL}
+    # ============================================================
+    # EXPORT GOOGLE SHEETS
+    # ============================================================
+    try:
+        credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+        client = gspread.authorize(credentials)
+        sh = client.open_by_key(SPREADSHEET_ID)
+        ws = sh.worksheet("KPI_Mensuel")
+        ws.update("A1", [list(kpi.columns)] + kpi.values.tolist())
+        st.success("📊 Feuille 'KPI_Mensuel' mise à jour avec succès !")
+    except Exception as e:
+        st.warning(f"⚠️ Échec update Sheets : {e}")
 
---
-L'équipe Data La Tribu
-"""
-    )
-    with open(csv_path, "rb") as f:
-        msg.add_attachment(f.read(), maintype="text", subtype="csv", filename="KPI_mensuel.csv")
+    # ============================================================
+    # ENVOI MAIL
+    # ============================================================
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "📈 Rapport KPI Mensuel"
+        msg["From"] = SMTP_USER
+        msg["To"] = "ton.mail@domaine.com"
+        msg.set_content("Bonjour,\n\nVoici le rapport KPI mensuel en pièce jointe.\n\nCordialement.")
+        with open(csv_path, "rb") as f:
+            msg.add_attachment(f.read(), maintype="text", subtype="csv", filename="KPI_Mensuel.csv")
 
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-        smtp.starttls()
-        smtp.login(SMTP_USER, SMTP_PASS)
-        smtp.send_message(msg)
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.send_message(msg)
 
-    st.success(f"📧 Rapport envoyé à {DEFAULT_RECEIVER}")
+        st.success("📧 Mail envoyé avec succès !")
+    except Exception as e:
+        st.warning(f"⚠️ Échec envoi mail : {e}")
 
 else:
     st.info("➡️ Importez les fichiers Transactions et Coupons pour démarrer.")
