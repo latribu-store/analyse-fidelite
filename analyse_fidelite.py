@@ -180,67 +180,54 @@ if file_tx and file_cp:
     # 👇👇👇
     # [on garde ton bloc KPI complet ici]
     # 👆👆👆
-    
-    # ============================================================
-    # CONSTRUCTION DU TABLEAU KPI MENSUEL
-    # ============================================================
-
-    try:
-        # Ici on suppose que merged_tx et merged_cp ont été créés dans ton flux
-        df_kpi_mensuels = compute_kpi_mensuels(merged_tx, merged_cp)
-        st.success("📊 Table KPI mensuelle générée avec succès.")
-    except Exception as e:
-        st.error(f"❌ Erreur lors du calcul des KPI mensuels : {e}")
-        st.stop()
-
-    # ============================================================
-    # EXPORTS LOCAUX / DRIVE / SHEETS
-    # ============================================================
-
-    # Création du dossier de données s’il n’existe pas
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    # ✅ Le bon DataFrame des KPI mensuels s'appelle bien "df_kpi_mensuels" (ou merged_kpi selon ta version)
-    try:
-        kpi = df_kpi_mensuels.copy()
-    except NameError:
-        try:
-            kpi = merged_kpi.copy()
-        except NameError:
-            st.error("❌ Aucune variable KPI trouvée — vérifie que la table KPI mensuelle a bien été générée.")
-            st.stop()
-
-    # Export CSV local
-    csv_path = os.path.join(DATA_DIR, "KPI_Mensuel.csv")
-    kpi.to_csv(csv_path, index=False, sep=";", encoding="utf-8-sig")
-    st.success(f"✅ Export CSV local terminé : {csv_path}")
 
     # ============================================================
     # EXPORT GOOGLE DRIVE
     # ============================================================
+
     try:
         credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
         drive_service = build("drive", "v3", credentials=credentials)
 
-        file_metadata = {"name": "KPI_Mensuel.csv", "mimeType": "text/csv"}
-        media = MediaIoBaseUpload(io.FileIO(csv_path, "rb"), mimetype="text/csv", resumable=True)
-        drive_file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        st.success(f"📁 Fichier uploadé sur Google Drive : ID {drive_file.get('id')}")
+        # Export transactions
+        tx_path = os.path.join(DATA_DIR, "transactions.csv")
+        merged_tx.to_csv(tx_path, index=False, sep=";", encoding="utf-8-sig")
+
+        file_metadata_tx = {"name": "transactions.csv", "mimeType": "text/csv"}
+        media_tx = MediaIoBaseUpload(io.FileIO(tx_path, "rb"), mimetype="text/csv", resumable=True)
+        drive_service.files().create(body=file_metadata_tx, media_body=media_tx, fields="id").execute()
+        st.success("✅ Fichier transactions.csv uploadé sur Google Drive")
+
+        # Export coupons
+        cp_path = os.path.join(DATA_DIR, "coupons.csv")
+        merged_cp.to_csv(cp_path, index=False, sep=";", encoding="utf-8-sig")
+
+        file_metadata_cp = {"name": "coupons.csv", "mimeType": "text/csv"}
+        media_cp = MediaIoBaseUpload(io.FileIO(cp_path, "rb"), mimetype="text/csv", resumable=True)
+        drive_service.files().create(body=file_metadata_cp, media_body=media_cp, fields="id").execute()
+        st.success("✅ Fichier coupons.csv uploadé sur Google Drive")
+
     except Exception as e:
-        st.warning(f"⚠️ Échec upload Drive : {e}")
+        st.warning(f"⚠️ Erreur upload Drive : {e}")
 
     # ============================================================
-    # EXPORT GOOGLE SHEETS
+    # EXPORT GOOGLE SHEETS (KPI)
     # ============================================================
+
     try:
         credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
         client = gspread.authorize(credentials)
         sh = client.open_by_key(SPREADSHEET_ID)
+
+        # ⚠️ Ici remplace 'kpi' par le nom exact de ton DataFrame KPI (ex: df_kpi_mensuels)
         ws = sh.worksheet("KPI_Mensuel")
         ws.update("A1", [list(kpi.columns)] + kpi.values.tolist())
-        st.success("📊 Feuille 'KPI_Mensuel' mise à jour avec succès !")
+
+        st.success("📊 Feuille Google Sheets 'KPI_Mensuel' mise à jour avec succès")
+
     except Exception as e:
-        st.warning(f"⚠️ Échec update Sheets : {e}")
+        st.warning(f"⚠️ Erreur update Google Sheets : {e}")
+
 
     # ============================================================
     # ENVOI MAIL
