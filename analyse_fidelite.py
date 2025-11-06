@@ -262,14 +262,20 @@ if file_tx and file_cp:
     panier_avec       = ticket_coupon.groupby(["month","OrganisationID"], dropna=False)["CA_HT_ticket"].mean().reset_index(name="Panier_moyen_avec_coupon")
     panier_sans       = ticket_sans_coupon.groupby(["month","OrganisationID"], dropna=False)["CA_HT_ticket"].mean().reset_index(name="Panier_moyen_sans_coupon")
 
-    # --- Harmonisation clés avant merges
-    for df_ in [base, assoc, new_ret, ret, coupons_used, coupons_emis, panier_client, panier_non_client, panier_avec, panier_sans]:
+    # --- Harmonisation clés avant merges (corrigé)
+    for df_ in [base, assoc, new_ret, ret, panier_client, panier_non_client, panier_avec, panier_sans]:
         if "OrganisationID" not in df_.columns and "organisationid" in df_.columns:
             df_["OrganisationID"] = df_["organisationid"]
+        df_["OrganisationID"] = df_["OrganisationID"].astype(str).fillna("")
         if "month" not in df_.columns:
             df_["month"] = df_.get("month", "")
-        df_["OrganisationID"] = df_["OrganisationID"].astype(str).fillna("")
         df_["month"] = df_["month"].astype(str).fillna("")
+
+    # ⚠️ Ne pas toucher à coupons_used / coupons_emis car leurs colonnes 'month_use' et 'month_emit'
+    # doivent être renommées manuellement :
+    coupons_used = coupons_used.rename(columns={"month_use": "month"})
+    coupons_emis = coupons_emis.rename(columns={"month_emit": "month"})
+
 
     # --- KPI fusionné
     kpi = (base
