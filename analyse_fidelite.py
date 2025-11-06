@@ -157,55 +157,47 @@ if file_tx and file_cp:
         st.info("ℹ️ Aucune nouvelle transaction à insérer.")
 
     # =====================================================
-    # 3️⃣ UPSERT COUPONS (ROBUSTE)
+    # 2️⃣ UPSERT TRANSACTIONS (ROBUSTE & TOLÉRANT)
     # =====================================================
-    cc_id   = pick_col(cp, "couponid")
-    cc_org  = pick_col(cp, "organisationid", "organizationid")
-    cc_emit = pick_col(cp, "creationdate")
-    cc_use  = pick_col(cp, "usedate")
-    cc_init = pick_col(cp, "initialvalue")
-    cc_rem  = pick_col(cp, "amount")
+    existing = con.execute("SELECT TransactionID FROM transactions").fetchdf()
+    existing_ids = set(existing["TransactionID"]) if not existing.empty else set()
+    new_tx = fact[~fact["TransactionID"].isin(existing_ids)]
 
-    if cc_id and cc_org:
-        cp_norm = pd.DataFrame({
-            "CouponID":        cp[cc_id].astype(str),
-            "OrganisationID":  cp[cc_org].astype(str),
-            "EmissionDate":    _ensure_date(cp[cc_emit]) if cc_emit else pd.NaT,
-            "UseDate":         _ensure_date(cp[cc_use]) if cc_use else pd.NaT,
-            "Amount_Initial":  pd.to_numeric(cp[cc_init], errors="coerce").fillna(0.0) if cc_init else 0.0,
-            "Amount_Remaining":pd.to_numeric(cp[cc_rem], errors="coerce").fillna(0.0) if cc_rem else 0.0
-        })
-        cp_norm["Value_Used_Line"] = (cp_norm["Amount_Initial"] - cp_norm["Amount_Remaining"]).clip(lower=0)
-        cp_norm["month_use"]  = _month_str(cp_norm["UseDate"])
-        cp_norm["month_emit"] = _month_str(cp_norm["EmissionDate"])
+    if not new_tx.empty:
+        # Harmonise le schéma selon la table DuckDB
+        schema_db = [r[0] for r in con.execute("PRAGMA table_info('transactions')").fetchall()]
+        for col in schema_db:
+            if col not in new_tx.columns:
+                new_tx[col] = np.nan
 
-        existing_cp = con.execute("SELECT CouponID FROM coupons").fetchdf()
-        existing_cp_ids = set(existing_cp["CouponID"]) if not existing_cp.empty else set()
-        new_cp = cp_norm[~cp_norm["CouponID"].isin(existing_cp_ids)]
+        # Réordonne les colonnes selon la table
+        new_tx = new_tx[[c for c in schema_db if c in new_tx.columns]]
 
-        if not new_cp.empty:
-            schema_cp = [r[0] for r in con.execute("PRAGMA table_info('coupons')").fetchall()]
-            for col in schema_cp:
-                if col not in new_cp.columns:
-                    new_cp[col] = np.nan
-            new_cp = new_cp[schema_cp]
-            new_cp = new_cp.astype({
-                "CouponID": "string",
-                "OrganisationID": "string",
-                "UseDate": "datetime64[ns]",
-                "EmissionDate": "datetime64[ns]",
-                "month_use": "string",
-                "month_emit": "string",
-                "Amount_Initial": "float64",
-                "Amount_Remaining": "float64",
-                "Value_Used_Line": "float64"
-            }, errors="ignore")
-            con.append("coupons", new_cp)
-            st.success(f"✅ {len(new_cp)} nouveaux coupons ajoutés.")
-        else:
-            st.info("ℹ️ Aucun nouveau coupon à insérer.")
+        # Typage conditionnel (ne crash pas si colonne absente)
+        type_map = {
+            "TransactionID": "string",
+            "ValidationDate": "datetime64[ns]",
+            "month": "string",
+            "OrganisationID": "string",
+            "CustomerID": "string",
+            "CA_TTC": "float64",
+            "CA_HT": "float64",
+            "Purch_Total_HT": "float64",
+            "Qty_Ticket": "float64",
+            "Estimated_Net_Margin_HT": "float64",
+        }
+        for col, t in type_map.items():
+            if col in new_tx.columns:
+                try:
+                    new_tx[col] = new_tx[col].astype(t)
+                except Exception:
+                    pass  # On ignore les erreurs de conversion mineures
+
+        con.append("transactions", new_tx)
+        st.success(f"✅ {len(new_tx)} nouvelles transactions ajoutées.")
     else:
-        st.warning("⚠️ Fichier coupons incomplet (CouponID/OrganisationID manquants) — KPI partiel sans bons.")
+        st.info("ℹ️ Aucune nouvelle transaction à insérer.")
+
 
     # =====================================================
     # 4️⃣ KPI MENSUELS
